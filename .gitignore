@@ -1,2 +1,6 @@
 *.egg-info
-data
+__pycache__/
+*.pyc
+*.py[cod]
+*$py.class
+data/
