@@ -1,0 +1,10 @@
+torch
+gymnasium
+minigrid
+transformers
+wandb
+numpy
+tqdm
+pyyaml
+pillow
+
