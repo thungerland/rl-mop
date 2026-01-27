@@ -306,6 +306,24 @@ def encode_obs_batch(obs_list, device):
     return x.to(device) 
     
 
+def detach_hidden(h):
+    """
+    Detach hidden states from computation graph.
+
+    Args:
+        h: List of (h_router, h_experts) tuples, one per layer
+
+    Returns:
+        Detached hidden states with same structure
+    """
+    h_detached = []
+    for h_router, h_experts in h:
+        h_router_detached = h_router.detach()
+        h_experts_detached = [h_exp.detach() for h_exp in h_experts]
+        h_detached.append((h_router_detached, h_experts_detached))
+    return h_detached
+
+
 def train_unroll_moe(policy, optimizer, vec_env, h, unroll_len, device):
     """
     One truncated-backprop through time (BPTT) unroll for MoE policy.
@@ -314,7 +332,7 @@ def train_unroll_moe(policy, optimizer, vec_env, h, unroll_len, device):
         policy: MixtureOfExpertsPolicy
         optimizer: torch optimizer
         vec_env: VectorBabyAIEnv
-        h: (h_router, h_experts) tuple of hidden states
+        h: List of (h_router, h_experts) tuples, one per layer
         unroll_len: int
         device: "cuda" or "cpu"
 
@@ -331,10 +349,7 @@ def train_unroll_moe(policy, optimizer, vec_env, h, unroll_len, device):
     total_count = 0
 
     # Truncated BPTT: detach hidden states
-    h_router, h_experts = h
-    h_router = h_router.detach()
-    h_experts = [h_exp.detach() for h_exp in h_experts]
-    h = (h_router, h_experts)
+    h = detach_hidden(h)
 
     for t in range(unroll_len):
         # Encode current obs
@@ -380,10 +395,7 @@ def train_unroll_moe(policy, optimizer, vec_env, h, unroll_len, device):
     avg_acc = total_correct / max(total_count, 1)
 
     # Detach hidden states for next unroll
-    h_router, h_experts = h
-    h_router = h_router.detach()
-    h_experts = [h_exp.detach() for h_exp in h_experts]
-    h = (h_router, h_experts)
+    h = detach_hidden(h)
 
     return h, avg_loss.item(), avg_acc
 
@@ -413,7 +425,11 @@ def load_config(config_path, args):
     if args.wandb_project is not None:
         config['wandb_project'] = args.wandb_project
     if args.expert_hidden_sizes is not None:
-        config['expert_hidden_sizes'] = [int(x) for x in args.expert_hidden_sizes.split(',')]
+        # Support both single-layer and multi-layer formats (matching YAML syntax):
+        # Single layer: "[32,64,128]" -> [32, 64, 128]
+        # Multi-layer: "[[32,64],[64,128],[128,256]]" -> [[32, 64], [64, 128], [128, 256]]
+        import ast
+        config['expert_hidden_sizes'] = ast.literal_eval(args.expert_hidden_sizes)
     if args.intermediate_dim is not None:
         config['intermediate_dim'] = int(args.intermediate_dim)
     if args.router_hidden_size is not None:
@@ -464,7 +480,7 @@ def main():
     parser.add_argument('--seed', type=int, default=None,
                         help='Random seed')
     parser.add_argument('--expert_hidden_sizes', type=str, default=None,
-                        help='Expert hidden sizes (e.g., "32,64,128")')
+                        help='Expert hidden sizes. Single layer: "[32,64,128]". Multi-layer: "[[32,64],[64,128],[128,256]]"')
     parser.add_argument('--intermediate_dim', type=int, default=None,
                         help='Intermediate dimension for layer communication')
     parser.add_argument('--router_hidden_size', type=int, default=None,
