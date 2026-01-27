@@ -273,36 +273,6 @@ class VectorBabyAIEnv:
 
         return actions
 
-class GRUPolicy(nn.Module):
-    def __init__(self, input_dim, hidden_size, num_actions, lang_dim=128):
-        super().__init__()
-
-        # --- Base GRU modules ---
-        self.gru = nn.GRU(
-            input_size=input_dim + lang_dim, 
-            hidden_size=hidden_size, 
-            batch_first=True
-        )
-        self.head = nn.Linear(hidden_size, num_actions)
-
-    def forward(self, x, lang_embs, h):
-        """
-        x:         (batch, input_dim)        these are the numerical obs (image+dir+carry) for one timestep
-        lang_embs: (batch, lang_dim)
-        h:         (1, batch, hidden_size)   GRU hidden state
-        """
-        
-        # Concatenate language to obs 
-        x = torch.cat([x, lang_embs], dim=1)  # (batch, input_dim + 128])
-        
-        # GRU step 
-        x = x.unsqueeze(1)            # (batch, 1, input_dim + 128)
-        out, h_new = self.gru(x, h)   # h: (1, batch, hidden_size)
-        out = out.squeeze(1)          # (batch, hidden_size)
-        logits = self.head(out)       # (batch, num_actions)
-        
-        return logits, h_new
-
 def encode_obs_batch(obs_list, device):
     """
     obs_list: list of length N, each obs is a dict with the keys 'image', 'direction'
@@ -335,87 +305,6 @@ def encode_obs_batch(obs_list, device):
     x = torch.cat([imgs, dirs_onehot, carry], dim=-1) # (N, input_dim)
     return x.to(device) 
     
-
-def train_unroll(policy, optimizer, vec_env, h, unroll_len, device):
-    """
-    One truncated-backprop through time (BPTT) unroll of length `unroll_len`.
-
-    Args:
-        policy: GRUPolicy
-        optimizer: torch optimizer
-        vec_env: VectorBabyAIEnv
-        h: GRU hidden state, shape [1, num_envs, hidden_size]
-        unroll_len: int
-        device: "cuda" or "cpu"
-
-    Returns:
-        new_h: updated hidden state after unroll (detached from graph)
-        avg_loss: scalar (float)
-        avg_acc: scalar (float)
-    """
-    policy.train()
-    num_envs = vec_env.num_envs
-
-    total_loss = 0.0
-    total_correct = 0
-    total_count = 0
-
-    # truncated BPTT: don't backprop through previous unrolls
-    h = h.detach()
-
-    # invalid_action_ids = invalid_action_ids or []
-
-    for t in range(unroll_len):
-        # Encode current obs 
-        obs_batch = encode_obs_batch(vec_env.obs_list, device) # (N, input_dim)
-
-        # Get expert actions as labels for this timestep
-        expert_actions = vec_env.get_expert_actions() # list of length N
-        expert_actions = torch.tensor(expert_actions, dtype=torch.long, device=device)
-
-        # Forward GRU policy for one step
-        lang_embs = vec_env.lang_embs
-        logits, h = policy(obs_batch, lang_embs, h) # logits [N, num_actions], h [1, N, hidden_size]
-
-        # Compute the supervised loss between policy and expert
-        step_loss = F.cross_entropy(logits, expert_actions)
-        total_loss += step_loss
-
-        # Compute the accuracy
-        with torch.no_grad():
-            preds = logits.argmax(dim=-1) # (N,)
-            correct = (preds == expert_actions).sum().item() # scalar
-            total_correct += correct
-            total_count += num_envs
-
-        # Extract the student actions (suggested by the GRU policy) to step the envs
-        with torch.no_grad():
-            student_actions = preds.detach().cpu().numpy()
-
-        # Step the envs according to student actions 
-        next_obs_list, terminated, truncated = vec_env.step(student_actions)
-        episode_over = terminated | truncated 
-
-        # Reset hidden state for envs where the episode has finished 
-        dones_tensor = torch.from_numpy(episode_over.astype(int)).to(device=device)  # [N]
-        done_mask = dones_tensor.unsqueeze(0).unsqueeze(-1) # [1,N,1]
-
-        # Where done_mask==1, zero out the hidden state
-        h = h * (1.0 - done_mask)
-
-    # Backprop through the unroll
-    avg_loss = total_loss / unroll_len
-    optimizer.zero_grad()
-    avg_loss.backward()
-    optimizer.step()
-
-    avg_acc = total_correct / max(total_count, 1)
-
-    # Detach hidden state for next unroll
-    h = h.detach()
-
-    return h, avg_loss.item(), avg_acc
-
 
 def train_unroll_moe(policy, optimizer, vec_env, h, unroll_len, device):
     """
@@ -513,8 +402,6 @@ def load_config(config_path, args):
         config['trial'] = int(args.trial)
     if args.num_envs is not None:
         config['num_envs'] = int(args.num_envs)
-    if args.hidden_size is not None:
-        config['hidden_size'] = int(args.hidden_size)
     if args.unroll_len is not None:
         config['unroll_len'] = int(args.unroll_len)
     if args.num_updates is not None:
@@ -535,7 +422,6 @@ def load_config(config_path, args):
     # Ensure all numeric config values are the correct type
     config['trial'] = int(config['trial'])
     config['num_envs'] = int(config['num_envs'])
-    config['hidden_size'] = int(config.get('hidden_size', 64))  # Default for compatibility
     config['unroll_len'] = int(config['unroll_len'])
     config['num_updates'] = int(config['num_updates'])
     config['lr'] = float(config['lr'])
@@ -565,8 +451,6 @@ def main():
                         help='Trial number for this run')
     parser.add_argument('--num_envs', type=int, default=None,
                         help='Number of parallel environments')
-    parser.add_argument('--hidden_size', type=int, default=None,
-                        help='GRU hidden size (kept for compatibility, not used in MoP)')
     parser.add_argument('--unroll_len', type=int, default=None,
                         help='Unroll length for BPTT')
     parser.add_argument('--num_updates', type=int, default=None,
@@ -595,7 +479,6 @@ def main():
     task_id = config['task_id']
     trial = config['trial']
     num_envs = config['num_envs']
-    hidden_size = config['hidden_size']
     unroll_len = config['unroll_len']
     num_updates = config['num_updates']
     lr = config['lr']
