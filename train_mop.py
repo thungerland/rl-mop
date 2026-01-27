@@ -21,9 +21,8 @@ from minigrid.utils.baby_ai_bot import BabyAIBot
 from PIL import Image
 from collections import deque
 
-# MoP imports
-from mop_config import Config
-from stateful_mop import StatefulMoPPolicy
+# Mixture of Experts import
+from mixture_of_experts import MixtureOfExpertsPolicy, reset_hidden_on_done
 
 class VectorBabyAIEnv:
     """
@@ -304,69 +303,6 @@ class GRUPolicy(nn.Module):
         
         return logits, h_new
 
-
-def create_babyai_mop_config(
-    input_dim: int = 280,  # 3*7*7 + 4 + 1 + 128
-    num_actions: int = 7,
-    intermediate_dim: int = 256,
-    router_dim: int = 64,
-    layers: list = None,
-    device: str = "cuda",
-    **kwargs
-) -> Config:
-    """
-    Create a MoP Config suitable for BabyAI tasks.
-
-    Args:
-        input_dim: Total input dimension (image + direction + carrying + language)
-        num_actions: Number of actions in the action space
-        intermediate_dim: Hidden dimension for intermediate layers
-        router_dim: Hidden dimension for router GRUs
-        layers: List of expert configurations, e.g., ["32,64,128", "64,128"]
-        device: Device to use
-        **kwargs: Additional config parameters
-
-    Returns:
-        Config object for MoP model
-    """
-    if layers is None:
-        # Default: 2 layers with 3 experts each of increasing size
-        layers = ["32,64,128", "64,128,256"]
-
-    # Required config parameters for MoP
-    config_dict = {
-        'input_dim': input_dim,
-        'output_dim': num_actions,
-        'intermediate_dim': intermediate_dim,
-        'router_dim': router_dim,
-        'layers': layers,
-        'device': device,
-        'task_id': 'babyai',  # Single task
-        'task_dim': 32,  # Not used since single task
-        'disable_task_embedding_layer': True,  # Single task, no need for task embeddings
-        'disable_wandb': True,  # We handle wandb separately
-        'disable_fixation_loss': True,
-        'disable_task_performance_scaling': True,
-        'expert_cost_exponent': 2.0,
-        'cost_based_loss_alpha': 0.0,  # Start with no complexity penalty
-        'cost_based_loss_epsilon': 0.0,
-        'dropout_max_prob': None,
-        'dropout_router_weight_threshold': None,
-        'early_stopping_threshold': None,
-        'ephemeral': False,
-        'learning_rate': 0.001,  # Placeholder, we control this in optimizer
-        'num_epochs': 1,  # Placeholder
-        'num_steps': 1000,  # Placeholder
-        'batch_size': 16,  # Placeholder, we control this with num_envs
-        'checkpoint': None,
-        'run_id': 'babyai_mop',
-    }
-
-    # Override with any provided kwargs
-    config_dict.update(kwargs)
-
-    return Config.from_dict(config_dict, migrate=False)
-
 def encode_obs_batch(obs_list, device):
     """
     obs_list: list of length N, each obs is a dict with the keys 'image', 'direction'
@@ -481,20 +417,20 @@ def train_unroll(policy, optimizer, vec_env, h, unroll_len, device):
     return h, avg_loss.item(), avg_acc
 
 
-def train_unroll_mop(policy, optimizer, vec_env, hidden_states, unroll_len, device):
+def train_unroll_moe(policy, optimizer, vec_env, h, unroll_len, device):
     """
-    One truncated-backprop through time (BPTT) unroll for MoP policy.
+    One truncated-backprop through time (BPTT) unroll for MoE policy.
 
     Args:
-        policy: StatefulMoPPolicy
+        policy: MixtureOfExpertsPolicy
         optimizer: torch optimizer
         vec_env: VectorBabyAIEnv
-        hidden_states: Dict of hidden states for all routers and experts
+        h: (h_router, h_experts) tuple of hidden states
         unroll_len: int
         device: "cuda" or "cpu"
 
     Returns:
-        new_hidden_states: updated hidden states after unroll (detached from graph)
+        h_new: updated hidden states after unroll (detached from graph)
         avg_loss: scalar (float)
         avg_acc: scalar (float)
     """
@@ -505,8 +441,11 @@ def train_unroll_mop(policy, optimizer, vec_env, hidden_states, unroll_len, devi
     total_correct = 0
     total_count = 0
 
-    # Truncated BPTT: detach all hidden states
-    hidden_states = {k: v.detach() for k, v in hidden_states.items()}
+    # Truncated BPTT: detach hidden states
+    h_router, h_experts = h
+    h_router = h_router.detach()
+    h_experts = [h_exp.detach() for h_exp in h_experts]
+    h = (h_router, h_experts)
 
     for t in range(unroll_len):
         # Encode current obs
@@ -516,9 +455,9 @@ def train_unroll_mop(policy, optimizer, vec_env, hidden_states, unroll_len, devi
         expert_actions = vec_env.get_expert_actions()  # list of length N
         expert_actions = torch.tensor(expert_actions, dtype=torch.long, device=device)
 
-        # Forward MoP policy for one step
+        # Forward MoE policy for one step
         lang_embs = vec_env.lang_embs
-        logits, hidden_states = policy(obs_batch, lang_embs, hidden_states)
+        logits, h, _ = policy(obs_batch, lang_embs, h, return_routing_info=False)
 
         # Compute the supervised loss between policy and expert
         step_loss = F.cross_entropy(logits, expert_actions)
@@ -540,13 +479,8 @@ def train_unroll_mop(policy, optimizer, vec_env, hidden_states, unroll_len, devi
         episode_over = terminated | truncated
 
         # Reset hidden states for envs where the episode has finished
-        dones_tensor = torch.from_numpy(episode_over.astype(int)).to(device=device)  # [N]
-
-        # For MoP, we need to reset all hidden states (routers and experts)
-        for key in hidden_states.keys():
-            # hidden_states[key] has shape [1, N, hidden_dim]
-            done_mask = dones_tensor.unsqueeze(0).unsqueeze(-1)  # [1, N, 1]
-            hidden_states[key] = hidden_states[key] * (1.0 - done_mask)
+        dones_tensor = torch.from_numpy(episode_over).to(device=device)
+        h = reset_hidden_on_done(h, dones_tensor)
 
     # Backprop through the unroll
     avg_loss = total_loss / unroll_len
@@ -557,9 +491,12 @@ def train_unroll_mop(policy, optimizer, vec_env, hidden_states, unroll_len, devi
     avg_acc = total_correct / max(total_count, 1)
 
     # Detach hidden states for next unroll
-    hidden_states = {k: v.detach() for k, v in hidden_states.items()}
+    h_router, h_experts = h
+    h_router = h_router.detach()
+    h_experts = [h_exp.detach() for h_exp in h_experts]
+    h = (h_router, h_experts)
 
-    return hidden_states, avg_loss.item(), avg_acc
+    return h, avg_loss.item(), avg_acc
 
 
 def load_config(config_path, args):
@@ -588,12 +525,12 @@ def load_config(config_path, args):
         config['log_interval'] = int(args.log_interval)
     if args.wandb_project is not None:
         config['wandb_project'] = args.wandb_project
-    if args.mop_layers is not None:
-        config['mop_layers'] = args.mop_layers.split(';')
-    if args.mop_intermediate_dim is not None:
-        config['mop_intermediate_dim'] = int(args.mop_intermediate_dim)
-    if args.mop_router_dim is not None:
-        config['mop_router_dim'] = int(args.mop_router_dim)
+    if args.expert_hidden_sizes is not None:
+        config['expert_hidden_sizes'] = [int(x) for x in args.expert_hidden_sizes.split(',')]
+    if args.intermediate_dim is not None:
+        config['intermediate_dim'] = int(args.intermediate_dim)
+    if args.router_hidden_size is not None:
+        config['router_hidden_size'] = int(args.router_hidden_size)
 
     # Ensure all numeric config values are the correct type
     config['trial'] = int(config['trial'])
@@ -606,20 +543,20 @@ def load_config(config_path, args):
     config['input_dim'] = int(config['input_dim'])
     config['lang_dim'] = int(config['lang_dim'])
 
-    # MoP-specific defaults
-    if 'mop_layers' not in config:
-        config['mop_layers'] = ["32,64,128", "64,128,256"]
-    if 'mop_intermediate_dim' not in config:
-        config['mop_intermediate_dim'] = 256
-    if 'mop_router_dim' not in config:
-        config['mop_router_dim'] = 64
+    # MoE-specific defaults
+    if 'expert_hidden_sizes' not in config:
+        config['expert_hidden_sizes'] = [32, 64, 128]
+    if 'intermediate_dim' not in config:
+        config['intermediate_dim'] = 256
+    if 'router_hidden_size' not in config:
+        config['router_hidden_size'] = 64
 
     return config
 
 
 def main():
     # Parse command-line arguments
-    parser = argparse.ArgumentParser(description='Train BabyAI with Mixture-of-Pathways (MoP) Policy')
+    parser = argparse.ArgumentParser(description='Train BabyAI with Mixture of Experts (MoE) Policy')
     parser.add_argument('--config', type=str, default='config.yaml',
                         help='Path to config file')
     parser.add_argument('--task_id', type=str, default=None,
@@ -642,12 +579,12 @@ def main():
                         help='Wandb project name')
     parser.add_argument('--seed', type=int, default=None,
                         help='Random seed')
-    parser.add_argument('--mop_layers', type=str, default=None,
-                        help='MoP layer configuration (e.g., "32,64,128;64,128,256")')
-    parser.add_argument('--mop_intermediate_dim', type=int, default=None,
-                        help='MoP intermediate dimension')
-    parser.add_argument('--mop_router_dim', type=int, default=None,
-                        help='MoP router dimension')
+    parser.add_argument('--expert_hidden_sizes', type=str, default=None,
+                        help='Expert hidden sizes (e.g., "32,64,128")')
+    parser.add_argument('--intermediate_dim', type=int, default=None,
+                        help='Intermediate dimension for layer communication')
+    parser.add_argument('--router_hidden_size', type=int, default=None,
+                        help='Router GRU hidden size')
 
     args = parser.parse_args()
 
@@ -680,26 +617,25 @@ def main():
     obs_list = vec_env.reset()
     num_actions = vec_env.action_space.n
 
-    # Create MoP policy
-    # Get MoP-specific config parameters or use defaults
-    mop_layers = config.get('mop_layers', ["32,64,128", "64,128,256"])
-    mop_intermediate_dim = config.get('mop_intermediate_dim', 256)
-    mop_router_dim = config.get('mop_router_dim', 64)
+    # Create MoE policy
+    # Get MoE-specific config parameters or use defaults
+    expert_hidden_sizes = config.get('expert_hidden_sizes', [32, 64, 128])
+    intermediate_dim = config.get('intermediate_dim', 256)
+    router_hidden_size = config.get('router_hidden_size', 64)
 
-    mop_config = create_babyai_mop_config(
-        input_dim=input_dim + lang_dim,  # Combined obs + language
+    policy = MixtureOfExpertsPolicy(
+        input_dim=input_dim,
+        intermediate_dim=intermediate_dim,
+        expert_hidden_sizes=expert_hidden_sizes,
+        router_hidden_size=router_hidden_size,
         num_actions=num_actions,
-        intermediate_dim=mop_intermediate_dim,
-        router_dim=mop_router_dim,
-        layers=mop_layers,
-        device=str(device)
-    )
+        lang_dim=lang_dim
+    ).to(device)
 
-    policy = StatefulMoPPolicy(mop_config).to(device)
     optimizer = optim.Adam(policy.parameters(), lr=lr)
 
-    # Initialize all hidden states for MoP (routers + experts)
-    hidden_states = policy.init_hidden_states(num_envs, device)
+    # Initialize hidden states for router and experts
+    h = policy.init_hidden(num_envs, device)
 
     # wandb init
     wandb.init(
@@ -716,11 +652,11 @@ def main():
     for update in trange(1, num_updates + 1):
 
         # One truncated backprop through time (BPTT) update
-        hidden_states, avg_loss, avg_acc = train_unroll_mop(
+        h, avg_loss, avg_acc = train_unroll_moe(
             policy,
             optimizer,
             vec_env,
-            hidden_states,
+            h,
             unroll_len,
             device
         )
