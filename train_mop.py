@@ -22,7 +22,7 @@ from PIL import Image
 from collections import deque
 
 # Mixture of Experts import
-from mixture_of_experts import MixtureOfExpertsPolicy, reset_hidden_on_done
+from mixture_of_experts import MixtureOfExpertsPolicy, reset_hidden_on_done, compute_lpc
 
 class VectorBabyAIEnv:
     """
@@ -324,7 +324,7 @@ def detach_hidden(h):
     return h_detached
 
 
-def train_unroll_moe(policy, optimizer, vec_env, h, unroll_len, device):
+def train_unroll_moe(policy, optimizer, vec_env, h, unroll_len, device, lpc_alpha=0.0):
     """
     One truncated-backprop through time (BPTT) unroll for MoE policy.
 
@@ -335,16 +335,20 @@ def train_unroll_moe(policy, optimizer, vec_env, h, unroll_len, device):
         h: List of (h_router, h_experts) tuples, one per layer
         unroll_len: int
         device: "cuda" or "cpu"
+        lpc_alpha: float, weight for LPC regularization (0.0 = disabled)
 
     Returns:
         h_new: updated hidden states after unroll (detached from graph)
         avg_loss: scalar (float)
         avg_acc: scalar (float)
+        avg_lpc: scalar (float), average LPC over the unroll
     """
     policy.train()
     num_envs = vec_env.num_envs
+    use_lpc = lpc_alpha > 0.0
 
     total_loss = 0.0
+    total_lpc = 0.0
     total_correct = 0
     total_count = 0
 
@@ -361,10 +365,17 @@ def train_unroll_moe(policy, optimizer, vec_env, h, unroll_len, device):
 
         # Forward MoE policy for one step
         lang_embs = vec_env.lang_embs
-        logits, h, _ = policy(obs_batch, lang_embs, h, return_routing_info=False)
+        logits, h, routing_info = policy(obs_batch, lang_embs, h, return_routing_info=use_lpc)
 
         # Compute the supervised loss between policy and expert
         step_loss = F.cross_entropy(logits, expert_actions)
+
+        # Compute LPC if enabled
+        if use_lpc:
+            step_lpc = compute_lpc(routing_info, policy.layer_expert_sizes)
+            total_lpc += step_lpc.item()
+            step_loss = step_loss + lpc_alpha * step_lpc
+
         total_loss += step_loss
 
         # Compute the accuracy
@@ -393,11 +404,12 @@ def train_unroll_moe(policy, optimizer, vec_env, h, unroll_len, device):
     optimizer.step()
 
     avg_acc = total_correct / max(total_count, 1)
+    avg_lpc = total_lpc / unroll_len if use_lpc else 0.0
 
     # Detach hidden states for next unroll
     h = detach_hidden(h)
 
-    return h, avg_loss.item(), avg_acc
+    return h, avg_loss.item(), avg_acc, avg_lpc
 
 
 def load_config(config_path, args):
@@ -434,6 +446,8 @@ def load_config(config_path, args):
         config['intermediate_dim'] = int(args.intermediate_dim)
     if args.router_hidden_size is not None:
         config['router_hidden_size'] = int(args.router_hidden_size)
+    if args.lpc_alpha is not None:
+        config['lpc_alpha'] = float(args.lpc_alpha)
 
     # Ensure all numeric config values are the correct type
     config['trial'] = int(config['trial'])
@@ -452,6 +466,8 @@ def load_config(config_path, args):
         config['intermediate_dim'] = 256
     if 'router_hidden_size' not in config:
         config['router_hidden_size'] = 64
+    if 'lpc_alpha' not in config:
+        config['lpc_alpha'] = 0.0
 
     return config
 
@@ -485,6 +501,8 @@ def main():
                         help='Intermediate dimension for layer communication')
     parser.add_argument('--router_hidden_size', type=int, default=None,
                         help='Router GRU hidden size')
+    parser.add_argument('--lpc_alpha', type=float, default=None,
+                        help='LPC regularization weight (0.0 = disabled)')
 
     args = parser.parse_args()
 
@@ -521,6 +539,7 @@ def main():
     expert_hidden_sizes = config.get('expert_hidden_sizes', [32, 64, 128])
     intermediate_dim = config.get('intermediate_dim', 256)
     router_hidden_size = config.get('router_hidden_size', 64)
+    lpc_alpha = config.get('lpc_alpha', 0.0)
 
     policy = MixtureOfExpertsPolicy(
         input_dim=input_dim,
@@ -551,13 +570,14 @@ def main():
     for update in trange(1, num_updates + 1):
 
         # One truncated backprop through time (BPTT) update
-        h, avg_loss, avg_acc = train_unroll_moe(
+        h, avg_loss, avg_acc, avg_lpc = train_unroll_moe(
             policy,
             optimizer,
             vec_env,
             h,
             unroll_len,
-            device
+            device,
+            lpc_alpha
         )
 
         # -------------------------
@@ -589,7 +609,7 @@ def main():
             else:
                 recent_path_ratio = float("nan")
 
-            wandb.log({
+            log_dict = {
                 "update": update,
                 "loss": avg_loss,
                 "accuracy": avg_acc,
@@ -597,7 +617,10 @@ def main():
                 "success_rate/cumulative": success_rate,
                 "path_ratio/recent": recent_path_ratio,
                 "episodes/total": vec_env.total_episodes,
-            })
+            }
+            if lpc_alpha > 0.0:
+                log_dict["lpc"] = avg_lpc
+            wandb.log(log_dict)
 
             print(
                 f"Update {update:04d} | "

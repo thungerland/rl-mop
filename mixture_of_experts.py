@@ -339,6 +339,46 @@ class MixtureOfExpertsPolicy(nn.Module):
         return logits, h_new_all, routing_info
 
 
+def compute_lpc(
+    routing_info: dict,
+    layer_expert_sizes: List[List[int]]
+) -> torch.Tensor:
+    """
+    Compute Learned Pathway Complexity (LPC) from routing weights.
+
+    LPC = Σ_layers Σ_experts (w_j × s_j²)
+
+    where w_j is the routing weight for expert j and s_j is the expert's hidden size.
+
+    Args:
+        routing_info: Dict with per-layer routing details from forward pass
+        layer_expert_sizes: List of expert hidden sizes per layer
+                           e.g., [[0, 16, 32]] for single layer or
+                           [[32, 64], [32, 64]] for multi-layer
+
+    Returns:
+        lpc: Scalar tensor (mean over batch) representing pathway complexity
+    """
+    total_lpc = 0.0
+
+    for layer_idx, expert_sizes in enumerate(layer_expert_sizes):
+        layer_key = f'layer_{layer_idx}'
+        router_weights = routing_info[layer_key]['router_weights']  # (batch, num_experts)
+
+        # Compute s_j² for each expert
+        sizes_squared = torch.tensor(
+            [s ** 2 for s in expert_sizes],
+            dtype=router_weights.dtype,
+            device=router_weights.device
+        )  # (num_experts,)
+
+        # LPC for this layer: sum over experts of (w_j × s_j²), then mean over batch
+        layer_lpc = (router_weights * sizes_squared).sum(dim=-1).mean()
+        total_lpc = total_lpc + layer_lpc
+
+    return total_lpc
+
+
 def reset_hidden_on_done(
     h: List[Tuple[torch.Tensor, List[torch.Tensor]]],
     dones: torch.Tensor
