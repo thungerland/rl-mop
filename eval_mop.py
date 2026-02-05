@@ -1,4 +1,5 @@
 import gymnasium as gym
+import minigrid
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -7,7 +8,10 @@ from pathlib import Path
 from tqdm.auto import trange
 from collections import defaultdict
 
-from mixture_of_experts import MixtureOfExpertsPolicy, reset_hidden_on_done
+from minigrid.wrappers import *
+from minigrid.envs.babyai import *
+
+from mixture_of_experts import MixtureOfExpertsPolicy, reset_hidden_on_done, compute_lpc
 
 
 class EvalVectorEnv:
@@ -234,8 +238,8 @@ def evaluate(policy, vec_env, num_episodes, device):
     Run evaluation episodes and collect routing data.
 
     Returns:
-        metrics: dict with success_rate, path_ratio
-        routing_data: list of (position, routing_weights) tuples
+        metrics: dict with success_rate, path_ratio, mean_lpc
+        routing_data: list of (position, routing_weights, lpc) tuples
     """
     policy.eval()
     num_envs = vec_env.num_envs
@@ -263,6 +267,9 @@ def evaluate(policy, vec_env, num_episodes, device):
             # Forward pass with routing info
             logits, h, routing_info = policy(obs_batch, lang_embs, h, return_routing_info=True)
 
+            # Compute per-sample LPC for this batch
+            batch_lpc = compute_lpc(routing_info, policy.layer_expert_sizes)
+
             # Collect routing data for each environment
             for i in range(num_envs):
                 pos = positions[i]
@@ -271,7 +278,20 @@ def evaluate(policy, vec_env, num_episodes, device):
                 for layer_name, layer_info in routing_info.items():
                     weights = layer_info['router_weights'][i].cpu().numpy()
                     layer_routing[layer_name] = weights
-                routing_data.append((pos, layer_routing))
+
+                # Compute per-sample LPC for this specific environment
+                sample_lpc = 0.0
+                for layer_idx, expert_sizes in enumerate(policy.layer_expert_sizes):
+                    layer_key = f'layer_{layer_idx}'
+                    weights = routing_info[layer_key]['router_weights'][i]  # (num_experts,)
+                    sizes_squared = torch.tensor(
+                        [s ** 2 for s in expert_sizes],
+                        dtype=weights.dtype,
+                        device=weights.device
+                    )
+                    sample_lpc += (weights * sizes_squared).sum().item()
+
+                routing_data.append((pos, layer_routing, sample_lpc))
 
             # Sample actions (greedy for eval)
             actions = logits.argmax(dim=-1).cpu().numpy()
@@ -294,10 +314,12 @@ def evaluate(policy, vec_env, num_episodes, device):
     # Compute metrics
     success_rate = vec_env.successful_episodes / vec_env.total_episodes if vec_env.total_episodes > 0 else 0.0
     path_ratio = vec_env.sum_path_ratio / vec_env.num_successful_with_ratio if vec_env.num_successful_with_ratio > 0 else float('nan')
+    mean_lpc = sum(rd[2] for rd in routing_data) / len(routing_data) if routing_data else 0.0
 
     metrics = {
         'success_rate': success_rate,
         'path_ratio': path_ratio,
+        'mean_lpc': mean_lpc,
         'total_episodes': vec_env.total_episodes,
         'successful_episodes': vec_env.successful_episodes,
     }
@@ -343,6 +365,7 @@ def main():
     print(f"Episodes: {metrics['total_episodes']}")
     print(f"Success Rate: {metrics['success_rate']:.2%}")
     print(f"Path Ratio: {metrics['path_ratio']:.2f}")
+    print(f"Mean LPC: {metrics['mean_lpc']:.2f}")
     print(f"Routing samples collected: {len(routing_data)}")
     print("="*50)
 

@@ -51,6 +51,7 @@ config.yaml
 *.pt
 *.ckpt
 checkpoints/
+modal_checkpoints/
 outputs/
 logs/
 
