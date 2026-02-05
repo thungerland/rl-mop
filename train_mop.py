@@ -412,6 +412,30 @@ def train_unroll_moe(policy, optimizer, vec_env, h, unroll_len, device, lpc_alph
     return h, avg_loss.item(), avg_acc, avg_lpc
 
 
+def save_checkpoint(policy, optimizer, config, update, checkpoint_dir, task_id, trial):
+    """
+    Save model checkpoint to disk.
+
+    Structure: checkpoint_dir/task_id/trial_N/checkpoint_final.pt
+    """
+    # Create directory structure
+    save_dir = Path(checkpoint_dir) / task_id / f"trial_{trial}"
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    checkpoint_path = save_dir / "checkpoint_final.pt"
+
+    checkpoint = {
+        'policy_state_dict': policy.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'config': config,
+        'update': update,
+    }
+
+    torch.save(checkpoint, checkpoint_path)
+    print(f"Checkpoint saved to {checkpoint_path}")
+    return checkpoint_path
+
+
 def load_config(config_path, args):
     """Load config from YAML and override with command-line args."""
     # Load base config
@@ -503,6 +527,10 @@ def main():
                         help='Router GRU hidden size')
     parser.add_argument('--lpc_alpha', type=float, default=None,
                         help='LPC regularization weight (0.0 = disabled)')
+
+    # Checkpoint arguments
+    parser.add_argument('--checkpoint_dir', type=str, default='checkpoints',
+                        help='Directory to save checkpoints')
 
     args = parser.parse_args()
 
@@ -630,6 +658,13 @@ def main():
                 f"path_ratio (recent): {recent_path_ratio:.2f} | "
                 f"total_episodes: {vec_env.total_episodes}"
             )
-        
+
+    # Save final checkpoint
+    checkpoint_dir = args.checkpoint_dir
+    save_checkpoint(policy, optimizer, config, num_updates, checkpoint_dir, task_id, trial)
+
+    wandb.finish()
+
+
 if __name__ == "__main__":
     main()

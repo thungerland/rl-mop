@@ -2,6 +2,10 @@ import modal
 
 app = modal.App("babyai-gru-train")
 
+# Persistent volume for storing checkpoints
+checkpoints_volume = modal.Volume.from_name("rl-mop", create_if_missing=True)
+CHECKPOINTS_PATH = "/checkpoints"
+
 image = (
     modal.Image.debian_slim(python_version="3.10")
     .apt_install("git")
@@ -15,6 +19,7 @@ image = (
     gpu="T4",
     timeout=60 * 60 * 8,
     secrets=[modal.Secret.from_name("wandb-secret")],
+    volumes={CHECKPOINTS_PATH: checkpoints_volume},
 )
 def train_run(
     task_id: str,
@@ -47,6 +52,7 @@ def train_run(
         "--config", f"/root/project/{config_path}",
         "--task_id", task_id,
         "--trial", str(trial),
+        "--checkpoint_dir", "/checkpoints",
     ]
 
     # Add any extra arguments
@@ -55,6 +61,10 @@ def train_run(
 
     # Run the training script
     result = subprocess.run(cmd, capture_output=False, text=True)
+
+    # Commit the volume to persist checkpoints
+    checkpoints_volume.commit()
+
     return result.returncode
 
 
