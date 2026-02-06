@@ -46,6 +46,12 @@ config.yaml
 # MacOS
 .DS_Store
 
+# Claude Code
+.claude/
+
+# Marimo
+__marimo__/
+
 # Model checkpoints and outputs
 *.pth
 *.pt
