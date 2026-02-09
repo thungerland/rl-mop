@@ -11,6 +11,7 @@ import wandb
 import random
 import argparse
 import yaml
+import threading
 from pathlib import Path
 
 from torch.utils.data import Dataset, DataLoader, random_split
@@ -23,6 +24,39 @@ from collections import deque
 
 # Mixture of Experts import
 from mixture_of_experts import MixtureOfExpertsPolicy, reset_hidden_on_done, compute_lpc
+
+
+class ReplanTimeout(Exception):
+    """Raised when bot.replan() takes too long."""
+    pass
+
+
+def replan_with_timeout(bot, prev_action, timeout_seconds=5):
+    """Call bot.replan() with a wall-clock timeout using threading."""
+
+    result = [None]
+    exception = [None]
+
+    def target():
+        try:
+            result[0] = bot.replan(prev_action)
+        except Exception as e:
+            exception[0] = e
+
+    thread = threading.Thread(target=target)
+    thread.start()
+    thread.join(timeout=timeout_seconds)
+
+    if thread.is_alive():
+        # Thread still running - timeout occurred
+        # Note: thread will continue in background but we ignore its result
+        raise ReplanTimeout("bot.replan() timed out")
+
+    if exception[0] is not None:
+        raise exception[0]
+
+    return result[0]
+
 
 class VectorBabyAIEnv:
     """
@@ -48,6 +82,9 @@ class VectorBabyAIEnv:
         # Store the last action executed in each env (None at episode start)
         # This will be relevant as the BabyAIBot must replan according to the action taken under the GRU policy
         self.previous_actions = [None] * num_envs
+
+        # Flag to track envs where bot.replan() failed (agent stuck in unreachable state)
+        self.force_reset = [False] * num_envs
 
         # Language encoding
         self.tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
@@ -123,7 +160,7 @@ class VectorBabyAIEnv:
         emb = self.lang_proj(emb)          # (1, 128)
         return emb.squeeze(0).detach()
 
-    # Helper function to compute the optimal no. of steps (the no. of steps the bot would have taken) 
+    # Helper function to compute the optimal no. of steps (the no. of steps the bot would have taken)
     # for completing a task.
     def compute_expert_steps_from_clone(self, env, max_steps=500):
         # We need to clone the environment since otherwise if we step on it, the agent can no longer solve the env from its initial configuration
@@ -134,10 +171,15 @@ class VectorBabyAIEnv:
         done = False
         truncated = False
 
-        while not done and not truncated and steps < max_steps:
-            a = bot.replan(None)
-            _, _, done, truncated, _ = env_clone.step(a.value)
-            steps += 1
+        try:
+            while not done and not truncated and steps < max_steps:
+                a = replan_with_timeout(bot, None, timeout_seconds=5)
+                _, _, done, truncated, _ = env_clone.step(a.value)
+                steps += 1
+        except (ReplanTimeout, AssertionError, Exception):
+            # Bot failed or timed out - return 1 as pessimistic fallback
+            # This makes path_ratio = agent_steps/1, showing agent as worse than optimal
+            return 1
 
         return steps
 
@@ -189,7 +231,38 @@ class VectorBabyAIEnv:
         truncated = np.zeros(self.num_envs, dtype=bool)
 
         for i, env in enumerate(self.envs):
-            
+
+            # Handle forced reset (agent stuck in unreachable state)
+            if self.force_reset[i]:
+                self.force_reset[i] = False
+                # Treat as truncation for metrics
+                self.total_episodes += 1
+                self.recent_successes.append(0)
+
+                # Reset env
+                obs, _ = env.reset()
+                mission = obs["mission"]
+                self.missions[i] = mission
+                self.lang_embs[i] = self._encode_mission(mission)
+
+                obs = obs.copy()
+                obs.pop('mission', None)
+                obs = self._add_carrying_flag(env, obs)
+
+                # Reset bot
+                self.bots[i] = BabyAIBot(env)
+
+                # Reset episode metrics
+                self.expert_steps[i] = self.compute_expert_steps_from_clone(env)
+                self.episode_steps[i] = 0
+                self.episode_success[i] = False
+                self.previous_actions[i] = None
+
+                next_obs_list.append(obs)
+                terminated[i] = False
+                truncated[i] = True
+                continue
+
             # Step the env with the provided action
             action = int(actions[i])
             obs, reward, term, trunc, info = env.step(action)
@@ -268,8 +341,14 @@ class VectorBabyAIEnv:
         actions = []
         for i, bot in enumerate(self.bots):
             prev = self.previous_actions[i]
-            a_opt = bot.replan(prev) # bot needs to replan according to the actual last taken action
-            actions.append(a_opt.value)
+            try:
+                a_opt = replan_with_timeout(bot, prev, timeout_seconds=5)
+                actions.append(a_opt.value)
+            except (ReplanTimeout, AssertionError, Exception):
+                # Bot can't find path or timed out - agent is stuck
+                # Mark for forced reset and return dummy action
+                self.force_reset[i] = True
+                actions.append(0)  # dummy action, env will be reset before stepping
 
         return actions
 
