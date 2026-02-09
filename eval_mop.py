@@ -4,6 +4,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import argparse
+import threading
 from pathlib import Path
 from tqdm.auto import trange
 from collections import defaultdict
@@ -12,6 +13,38 @@ from minigrid.wrappers import *
 from minigrid.envs.babyai import *
 
 from mixture_of_experts import MixtureOfExpertsPolicy, reset_hidden_on_done, compute_lpc
+
+
+class ReplanTimeout(Exception):
+    """Raised when bot.replan() takes too long."""
+    pass
+
+
+def replan_with_timeout(bot, prev_action, timeout_seconds=5):
+    """Call bot.replan() with a wall-clock timeout using threading."""
+
+    result = [None]
+    exception = [None]
+
+    def target():
+        try:
+            result[0] = bot.replan(prev_action)
+        except Exception as e:
+            exception[0] = e
+
+    thread = threading.Thread(target=target)
+    thread.start()
+    thread.join(timeout=timeout_seconds)
+
+    if thread.is_alive():
+        # Thread still running - timeout occurred
+        # Note: thread will continue in background but we ignore its result
+        raise ReplanTimeout("bot.replan() timed out")
+
+    if exception[0] is not None:
+        raise exception[0]
+
+    return result[0]
 
 
 class EvalVectorEnv:
@@ -104,10 +137,15 @@ class EvalVectorEnv:
         done = False
         truncated = False
 
-        while not done and not truncated and steps < max_steps:
-            a = bot.replan(None)
-            _, _, done, truncated, _ = env_clone.step(a.value)
-            steps += 1
+        try:
+            while not done and not truncated and steps < max_steps:
+                a = replan_with_timeout(bot, None, timeout_seconds=5)
+                _, _, done, truncated, _ = env_clone.step(a.value)
+                steps += 1
+        except (ReplanTimeout, AssertionError, Exception):
+            # Bot failed or timed out - return 1 as pessimistic fallback
+            # This makes path_ratio = agent_steps/1, showing agent as worse than optimal
+            return 1
 
         return steps
 
