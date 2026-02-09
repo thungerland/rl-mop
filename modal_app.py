@@ -72,7 +72,7 @@ def train_run(
 def main(
     task_ids: str,
     trials: str,
-    script: str = "train.py",
+    script: str = "train_mop.py",
     extra_args: str = None,
 ):
     """
