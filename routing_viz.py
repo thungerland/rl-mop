@@ -33,7 +33,7 @@ def _(Path, mo):
 
     # Number of episodes for evaluation
     num_episodes_slider = mo.ui.slider(
-        start=10, stop=200, value=50, step=10,
+        start=10, stop=500, value=50, step=10,
         label="Number of Episodes"
     )
 
