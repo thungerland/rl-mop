@@ -8,6 +8,9 @@ Code for an adaptive imitation learning model to investigate deep learning routi
 **Local training:**
 ```bash
 python train_mop.py --config config.yaml --task_id BabyAI-GoToObj-v0 --trial 0
+
+# For complex multi-room environments, increase max steps to allow more exploration:
+python train_mop.py --task_id BabyAI-GoToImpUnlock-v0 --trial 0 --max_steps 1500
 ```
 
 **Modal (cloud) training:**

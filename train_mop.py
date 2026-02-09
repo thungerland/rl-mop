@@ -67,12 +67,13 @@ class VectorBabyAIEnv:
     - Auto-resets envs when they finish
     """
 
-    def __init__(self, task_id: str, num_envs: int, device: torch.device):
-        
+    def __init__(self, task_id: str, num_envs: int, device: torch.device, max_steps: int = None):
+
         from transformers import AutoTokenizer, AutoModel
         self.task_id = task_id
         self.num_envs = num_envs
         self.device = device
+        self.max_steps = max_steps  # None = use environment default
 
         self.envs = []
         self.bots = []
@@ -112,9 +113,12 @@ class VectorBabyAIEnv:
         # Initialise cache for language embeddings
         self.lang_embs = torch.zeros(num_envs, 128, device=device)
 
-        # Create N envs + bots + initial states 
+        # Create N envs + bots + initial states
         for i in range(num_envs):
-            env = gym.make(task_id)
+            if self.max_steps is not None:
+                env = gym.make(task_id, max_steps=self.max_steps)
+            else:
+                env = gym.make(task_id)
             env = env.unwrapped
     
             obs, _ = env.reset() # ignore info from .reset() using _
@@ -551,6 +555,8 @@ def load_config(config_path, args):
         config['router_hidden_size'] = int(args.router_hidden_size)
     if args.lpc_alpha is not None:
         config['lpc_alpha'] = float(args.lpc_alpha)
+    if args.max_steps is not None:
+        config['max_steps'] = int(args.max_steps)
 
     # Ensure all numeric config values are the correct type
     config['trial'] = int(config['trial'])
@@ -606,6 +612,8 @@ def main():
                         help='Router GRU hidden size')
     parser.add_argument('--lpc_alpha', type=float, default=None,
                         help='LPC regularization weight (0.0 = disabled)')
+    parser.add_argument('--max_steps', type=int, default=None,
+                        help='Max steps per episode (None = use environment default)')
 
     # Checkpoint arguments
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints',
@@ -637,7 +645,8 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Create vectorized env
-    vec_env = VectorBabyAIEnv(task_id, num_envs, device)
+    max_steps = config.get('max_steps', None)
+    vec_env = VectorBabyAIEnv(task_id, num_envs, device, max_steps=max_steps)
     obs_list = vec_env.reset()
     num_actions = vec_env.action_space.n
 

@@ -84,6 +84,7 @@ All parameters can be overridden via command line:
 - `--lr`: Learning rate
 - `--seed`: Random seed
 - `--log_interval`: How often to log metrics
+- `--max_steps`: Max steps per episode before truncation (default: environment-specific, e.g. 576 for GoToImpUnlock). Increase for complex multi-room environments to allow more exploration.
 
 ## Tips
 
