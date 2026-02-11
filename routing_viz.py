@@ -10,11 +10,14 @@ def _():
     import torch
     import numpy as np
     import matplotlib.pyplot as plt
-    import matplotlib.colors as mcolors
     from pathlib import Path
-    from collections import defaultdict
 
-    return Path, defaultdict, mo, np, plt, torch
+    from plotting_utils import (
+        plot_overall_routing,
+        get_available_analyses,
+    )
+
+    return Path, get_available_analyses, mo, np, plot_overall_routing, plt, torch
 
 
 @app.cell
@@ -92,8 +95,14 @@ def _(Path, checkpoint_dropdown, mo, np, num_envs_slider, num_episodes_slider, t
             cached = json.load(f)
 
         # Convert cached data back to expected format
+        # Handle both old format (3-tuple) and new format (4-tuple with env_context)
         routing_data = [
-            (tuple(r['position']), {k: np.array(v) for k, v in r['layer_routing'].items()}, r['lpc'])
+            (
+                tuple(r['position']),
+                {k: np.array(v) for k, v in r['layer_routing'].items()},
+                r['lpc'],
+                r.get('env_context', {})  # Default to empty dict for old cache files
+            )
             for r in cached['routing_data']
         ]
         metrics = {
@@ -128,55 +137,35 @@ def _(Path, checkpoint_dropdown, mo, np, num_envs_slider, num_episodes_slider, t
 
 
 @app.cell
-def _(defaultdict, np, routing_data):
-    # Aggregate routing data by position
-    position_routing = defaultdict(list)
-    position_lpc = defaultdict(list)
-    for _pos, _layer_routing, _lpc in routing_data:
-        position_routing[_pos].append(_layer_routing)
-        position_lpc[_pos].append(_lpc)
+def _(get_available_analyses, mo, routing_data):
+    # Determine available analysis types based on the data
+    available_analyses = get_available_analyses(routing_data)
 
-    # Compute average routing weights per position
-    avg_routing_by_pos = {}
-    for _pos, _routings in position_routing.items():
-        avg_routing_by_pos[_pos] = {
-            _layer: np.mean([r[_layer] for r in _routings], axis=0)
-            for _layer in _routings[0].keys()
-        }
+    analysis_options = {
+        'overall': 'Overall (all data)',
+        'by_target_quadrant': 'By target quadrant',
+        'by_door_position': 'By door position',
+        'by_key_position': 'By key position',
+    }
 
-    # Compute average LPC per position
-    avg_lpc_by_pos = {_pos: np.mean(_lpcs) for _pos, _lpcs in position_lpc.items()}
+    # Filter to only available analyses
+    available_options = {k: v for k, v in analysis_options.items() if k in available_analyses}
 
-    # Get grid bounds
-    all_positions = list(position_routing.keys())
-    x_coords = [p[0] for p in all_positions]
-    y_coords = [p[1] for p in all_positions]
-    x_min, x_max = min(x_coords), max(x_coords)
-    y_min, y_max = min(y_coords), max(y_coords)
-    grid_width = x_max - x_min + 1
-    grid_height = y_max - y_min + 1
-
-    # Get number of layers and experts
-    sample_routing = list(avg_routing_by_pos.values())[0]
-    num_layers = len(sample_routing)
-    layer_names = sorted(sample_routing.keys())
-    num_experts_per_layer = [len(sample_routing[ln]) for ln in layer_names]
-
-    (grid_width, grid_height, num_layers, num_experts_per_layer, x_min, y_min)
-    return (
-        avg_lpc_by_pos,
-        avg_routing_by_pos,
-        grid_height,
-        grid_width,
-        layer_names,
-        num_experts_per_layer,
-        x_min,
-        y_min,
+    analysis_dropdown = mo.ui.dropdown(
+        options=available_options,
+        label="Analysis Type",
+        value='overall'
     )
+
+    mo.vstack([
+        mo.md("## Analysis Options"),
+        analysis_dropdown,
+    ])
+    return (analysis_dropdown,)
 
 
 @app.cell
-def _(task_id, torch):
+def _(task_id):
     import gymnasium as gym
 
     # Render a sample environment for reference
@@ -184,129 +173,18 @@ def _(task_id, torch):
     sample_env.reset()
     env_image = sample_env.unwrapped.get_frame(tile_size=32, agent_pov=False, highlight=False)
     sample_env.close()
-
-    env_image_tensor = torch.from_numpy(env_image)
     return (env_image,)
 
 
 @app.cell
-def _(
-    Path,
-    avg_lpc_by_pos,
-    avg_routing_by_pos,
-    env_image,
-    grid_height,
-    grid_width,
-    layer_names,
-    np,
-    num_experts_per_layer,
-    plt,
-    task_id,
-    x_min,
-    y_min,
-):
-    # Create visualization with environment render, routing heatmaps, and LPC heatmap
-    _num_heatmaps = len(layer_names)
-    # +1 for environment, +1 for LPC heatmap
-    _fig_heatmap, _axes = plt.subplots(1, _num_heatmaps + 2, figsize=(5 * (_num_heatmaps + 2), 6))
-
-    # Plot 1: Environment render
-    _axes[0].imshow(env_image)
-    _axes[0].set_title("Environment Layout")
-    _axes[0].axis('off')
-
-    # Distinct colormaps for each expert - using perceptually uniform maps
-    # Each expert gets its own colormap that shows intensity clearly
-    _expert_cmaps = [
-        plt.cm.Blues,    # Expert 0: blue
-        plt.cm.Oranges,  # Expert 1: orange
-        plt.cm.Greens,   # Expert 2: green
-        plt.cm.Reds,     # Expert 3: red
-        plt.cm.Purples,  # Expert 4: purple
-        plt.cm.Greys,    # Expert 5: grey
-    ]
-
-    # For each layer, create a dominant expert + intensity heatmap
-    for _layer_idx, _layer_name in enumerate(layer_names):
-        _ax = _axes[_layer_idx + 1]
-
-        # Create grids for dominant expert and confidence
-        _dominant_grid = np.full((grid_height, grid_width), -1, dtype=int)
-        _confidence_grid = np.full((grid_height, grid_width), np.nan)
-
-        for _pos, _routing in avg_routing_by_pos.items():
-            _x, _y = _pos
-            _gx, _gy = _x - x_min, _y - y_min
-
-            _weights = _routing[_layer_name]
-            _dominant_expert = np.argmax(_weights)
-            _confidence = _weights[_dominant_expert]
-
-            _dominant_grid[_gy, _gx] = _dominant_expert
-            _confidence_grid[_gy, _gx] = _confidence
-
-        # Create RGB image with intensity mapped through colormaps
-        _rgb_image = np.ones((grid_height, grid_width, 3)) * 0.9  # Light gray background
-
-        for _gy in range(grid_height):
-            for _gx in range(grid_width):
-                _expert_idx = _dominant_grid[_gy, _gx]
-                if _expert_idx >= 0:
-                    _cmap = _expert_cmaps[_expert_idx % len(_expert_cmaps)]
-                    # Map confidence (0.33 to 1.0 typical range) to color intensity (0.3 to 1.0)
-                    # This makes low confidence visible but still distinguishable
-                    _intensity = 0.3 + 0.7 * _confidence_grid[_gy, _gx]
-                    _color = _cmap(_intensity)
-                    _rgb_image[_gy, _gx, :] = _color[:3]
-
-        _im = _ax.imshow(_rgb_image, origin='upper')
-        _ax.set_title(f"{_layer_name}\n(color=expert, intensity=confidence)")
-        _ax.set_xlabel("X")
-        _ax.set_ylabel("Y")
-
-        # Add grid lines
-        _ax.set_xticks(np.arange(-0.5, grid_width, 1), minor=True)
-        _ax.set_yticks(np.arange(-0.5, grid_height, 1), minor=True)
-        _ax.grid(which='minor', color='white', linestyle='-', linewidth=0.5)
-        _ax.tick_params(which='minor', size=0)
-
-    # LPC heatmap (last subplot)
-    _ax_lpc = _axes[-1]
-    _lpc_grid = np.full((grid_height, grid_width), np.nan)
-
-    for _pos, _lpc in avg_lpc_by_pos.items():
-        _x, _y = _pos
-        _gx, _gy = _x - x_min, _y - y_min
-        _lpc_grid[_gy, _gx] = _lpc
-
-    _lpc_im = _ax_lpc.imshow(_lpc_grid, origin='upper', cmap='viridis')
-    _ax_lpc.set_title("Mean LPC by Position")
-    _ax_lpc.set_xlabel("X")
-    _ax_lpc.set_ylabel("Y")
-
-    # Add grid lines
-    _ax_lpc.set_xticks(np.arange(-0.5, grid_width, 1), minor=True)
-    _ax_lpc.set_yticks(np.arange(-0.5, grid_height, 1), minor=True)
-    _ax_lpc.grid(which='minor', color='white', linestyle='-', linewidth=0.5)
-    _ax_lpc.tick_params(which='minor', size=0)
-
-    # Add colorbar for LPC
-    _lpc_cbar = _fig_heatmap.colorbar(_lpc_im, ax=_ax_lpc, shrink=0.8)
-    _lpc_cbar.set_label('LPC')
-
-    # Add legend for expert colors
-    _legend_elements = [
-        plt.Line2D([0], [0], marker='s', color='w',
-                   markerfacecolor=_expert_cmaps[i](0.7)[:3],
-                   markersize=12, label=f'Expert {i}')
-        for i in range(max(num_experts_per_layer))
-    ]
-    _fig_heatmap.legend(handles=_legend_elements, loc='lower center', ncol=max(num_experts_per_layer),
-               bbox_to_anchor=(0.4, -0.02))
-
-    plt.tight_layout(rect=[0, 0.05, 1, 1])
-    plt.gca()
-    fig_heatmap = _fig_heatmap
+def _(analysis_dropdown, env_image, plot_overall_routing, routing_data):
+    # Create visualization using plotting utilities
+    # Currently only 'overall' is implemented; other analysis types can be added
+    fig_heatmap = plot_overall_routing(
+        routing_data=routing_data,
+        env_image=env_image,
+        filter_fn=None,  # No filtering for 'overall' analysis
+    )
     return (fig_heatmap,)
 
 
