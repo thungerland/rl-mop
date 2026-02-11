@@ -112,7 +112,7 @@ def save_routing_data(routing_data: list, checkpoint_path: Path, config: dict,
 
     # Convert routing data to JSON-serializable format
     routing_json = []
-    for pos, layer_routing, lpc in routing_data:
+    for pos, layer_routing, lpc, env_context in routing_data:
         # Handle both numpy arrays and regular lists
         layer_routing_json = {}
         for k, v in layer_routing.items():
@@ -124,7 +124,8 @@ def save_routing_data(routing_data: list, checkpoint_path: Path, config: dict,
         routing_json.append({
             'position': [int(p) for p in pos],
             'layer_routing': layer_routing_json,
-            'lpc': float(lpc)
+            'lpc': float(lpc),
+            'env_context': env_context
         })
 
     cache_data = {
