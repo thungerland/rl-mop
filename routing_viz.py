@@ -19,10 +19,18 @@ def _():
 
 @app.cell
 def _(Path, mo):
-    # Find available checkpoints
-    checkpoint_dir = Path("checkpoints")
-    checkpoints = list(checkpoint_dir.glob("**/*.pt"))
-    checkpoint_options = {str(cp.relative_to(checkpoint_dir)): str(cp) for cp in checkpoints}
+    # Find available checkpoints (check both directories)
+    checkpoint_dirs = [Path("modal_checkpoints"), Path("checkpoints")]
+    checkpoints = []
+    for checkpoint_dir in checkpoint_dirs:
+        if checkpoint_dir.exists():
+            for cp in checkpoint_dir.glob("**/*.pt"):
+                checkpoints.append((checkpoint_dir, cp))
+
+    checkpoint_options = {
+        str(cp.relative_to(base)): str(cp)
+        for base, cp in checkpoints
+    }
 
     # UI for checkpoint selection
     checkpoint_dropdown = mo.ui.dropdown(
@@ -31,10 +39,16 @@ def _(Path, mo):
         value=list(checkpoint_options.keys())[0] if checkpoint_options else None
     )
 
-    # Number of episodes for evaluation
+    # Cache toggle
+    use_cache_toggle = mo.ui.checkbox(
+        label="Use cached routing data (if available)",
+        value=True
+    )
+
+    # Number of episodes for evaluation (used when not using cache)
     num_episodes_slider = mo.ui.slider(
         start=10, stop=500, value=50, step=10,
-        label="Number of Episodes"
+        label="Number of Episodes (for fresh evaluation)"
     )
 
     # Number of parallel environments
@@ -46,14 +60,16 @@ def _(Path, mo):
     mo.vstack([
         mo.md("## Configuration"),
         checkpoint_dropdown,
+        use_cache_toggle,
         num_episodes_slider,
         num_envs_slider,
     ])
-    return checkpoint_dropdown, num_envs_slider, num_episodes_slider
+    return checkpoint_dropdown, num_envs_slider, num_episodes_slider, use_cache_toggle
 
 
 @app.cell
-def _(checkpoint_dropdown, mo, num_envs_slider, num_episodes_slider, torch):
+def _(Path, checkpoint_dropdown, mo, np, num_envs_slider, num_episodes_slider, torch, use_cache_toggle):
+    import json
     from mixture_of_experts import MixtureOfExpertsPolicy, reset_hidden_on_done, compute_lpc
     from eval_mop import EvalVectorEnv, encode_obs_batch, load_checkpoint, evaluate
 
@@ -61,20 +77,46 @@ def _(checkpoint_dropdown, mo, num_envs_slider, num_episodes_slider, torch):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Load the model
+    # Load checkpoint to get config
     policy, config = load_checkpoint(checkpoint_dropdown.value, device)
     task_id = config['task_id']
+    trial = config['trial']
 
-    # Create evaluation environment
-    vec_env = EvalVectorEnv(task_id, num_envs_slider.value, device)
+    # Check for cached routing data
+    cache_path = Path("evaluation_cache") / task_id / f"trial_{trial}" / "routing_data.json"
+    cache_exists = cache_path.exists()
 
-    # Run evaluation
-    metrics, routing_data = evaluate(
-        policy, vec_env, num_episodes_slider.value, device
-    )
+    if use_cache_toggle.value and cache_exists:
+        # Load from cache
+        with open(cache_path) as f:
+            cached = json.load(f)
+
+        # Convert cached data back to expected format
+        routing_data = [
+            (tuple(r['position']), {k: np.array(v) for k, v in r['layer_routing'].items()}, r['lpc'])
+            for r in cached['routing_data']
+        ]
+        metrics = {
+            'success_rate': cached['metrics']['success_rate'],
+            'path_ratio': cached['metrics']['path_ratio'],
+            'mean_lpc': cached['metrics']['mean_lpc'],
+            'total_episodes': cached['num_episodes'],
+        }
+        data_source = f"Loaded from cache ({cached['evaluated_at'][:10]})"
+    else:
+        # Run fresh evaluation
+        vec_env = EvalVectorEnv(task_id, num_envs_slider.value, device)
+        metrics, routing_data = evaluate(
+            policy, vec_env, num_episodes_slider.value, device
+        )
+        data_source = "Fresh evaluation"
+
+    cache_status = "available" if cache_exists else "not found"
 
     mo.md(f"""
     ## Evaluation Results
+    - **Source**: {data_source}
+    - **Cache**: {cache_status}
     - **Task**: {task_id}
     - **Episodes**: {metrics['total_episodes']}
     - **Success Rate**: {metrics['success_rate']:.1%}
