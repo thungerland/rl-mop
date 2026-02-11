@@ -157,6 +157,71 @@ class EvalVectorEnv:
             positions.append(pos)
         return positions
 
+    def _extract_env_context(self, env) -> dict:
+        """Extract positions of all relevant objects from the environment grid.
+
+        Returns a dict with:
+            - grid_size: (width, height)
+            - goals: list of (x, y, color) for Goal objects
+            - doors: list of (x, y, color, is_open, is_locked)
+            - keys: list of (x, y, color)
+            - balls: list of (x, y, color)
+            - boxes: list of (x, y, color)
+        """
+        context = {
+            'grid_size': (env.grid.width, env.grid.height),
+            'goals': [],
+            'doors': [],
+            'keys': [],
+            'balls': [],
+            'boxes': [],
+        }
+
+        for j in range(env.grid.height):
+            for i in range(env.grid.width):
+                cell = env.grid.get(i, j)
+                if cell is None:
+                    continue
+
+                obj_type = cell.type
+                color = getattr(cell, 'color', None)
+
+                if obj_type == 'goal':
+                    context['goals'].append((i, j, color))
+                elif obj_type == 'door':
+                    is_open = getattr(cell, 'is_open', False)
+                    is_locked = getattr(cell, 'is_locked', False)
+                    context['doors'].append((i, j, color, is_open, is_locked))
+                elif obj_type == 'key':
+                    context['keys'].append((i, j, color))
+                elif obj_type == 'ball':
+                    context['balls'].append((i, j, color))
+                elif obj_type == 'box':
+                    context['boxes'].append((i, j, color))
+
+        return context
+
+    def get_env_contexts(self):
+        """Get environment context for each environment."""
+        return [self._extract_env_context(env) for env in self.envs]
+
+    def _reset_single_env(self, i: int, env):
+        """Reset a single environment and update internal state. Returns the observation."""
+        obs, _ = env.reset()
+
+        mission = obs["mission"]
+        self.missions[i] = mission
+        self.lang_embs[i] = self._encode_mission(mission)
+
+        obs = obs.copy()
+        obs.pop('mission', None)
+        obs = self._add_carrying_flag(env, obs)
+
+        self.episode_steps[i] = 0
+        self.expert_steps[i] = self._compute_optimal_steps(env)
+
+        return obs
+
     def reset(self):
         """Reset all environments."""
         self.obs_list = []
@@ -277,7 +342,8 @@ def evaluate(policy, vec_env, num_episodes, device):
 
     Returns:
         metrics: dict with success_rate, path_ratio, mean_lpc
-        routing_data: list of (position, routing_weights, lpc) tuples
+        routing_data: list of (position, layer_routing, lpc, env_context) tuples
+            where env_context contains grid_size, goals, doors, keys, balls, boxes
     """
     policy.eval()
     num_envs = vec_env.num_envs
@@ -285,12 +351,16 @@ def evaluate(policy, vec_env, num_episodes, device):
     # Initialize hidden states
     h = policy.init_hidden(num_envs, device)
 
-    # Storage for routing data: (position, routing_weights per layer)
+    # Storage for routing data: (position, routing_weights per layer, lpc, env_context)
     routing_data = []
 
     # Run until we have enough episodes
     vec_env.reset()
     episodes_completed = 0
+
+    # Capture environment contexts (object positions) for each environment
+    # These are captured at episode start and updated when environments reset
+    env_contexts = vec_env.get_env_contexts()
 
     with torch.no_grad():
         pbar = trange(num_episodes, desc="Evaluating")
@@ -305,7 +375,7 @@ def evaluate(policy, vec_env, num_episodes, device):
             # Forward pass with routing info
             logits, h, routing_info = policy(obs_batch, lang_embs, h, return_routing_info=True)
 
-            # Compute per-sample LPC for this batch
+            # Compute per-sample LPC for this batch (unused, kept for potential future use)
             batch_lpc = compute_lpc(routing_info, policy.layer_expert_sizes)
 
             # Collect routing data for each environment
@@ -329,7 +399,8 @@ def evaluate(policy, vec_env, num_episodes, device):
                     )
                     sample_lpc += (weights * sizes_squared).sum().item()
 
-                routing_data.append((pos, layer_routing, sample_lpc))
+                # Include environment context (object positions from episode start)
+                routing_data.append((pos, layer_routing, sample_lpc, env_contexts[i]))
 
             # Sample actions (greedy for eval)
             actions = logits.argmax(dim=-1).cpu().numpy()
@@ -342,6 +413,12 @@ def evaluate(policy, vec_env, num_episodes, device):
             dones_tensor = torch.from_numpy(episode_over).to(device)
             h = reset_hidden_on_done(h, dones_tensor)
 
+            # Update environment contexts for environments that just reset
+            # (vec_env.step() internally resets environments when episode ends)
+            for i in range(num_envs):
+                if episode_over[i]:
+                    env_contexts[i] = vec_env._extract_env_context(vec_env.envs[i])
+
             # Count completed episodes
             new_episodes = episode_over.sum()
             episodes_completed += new_episodes
@@ -352,7 +429,7 @@ def evaluate(policy, vec_env, num_episodes, device):
     # Compute metrics
     success_rate = vec_env.successful_episodes / vec_env.total_episodes if vec_env.total_episodes > 0 else 0.0
     path_ratio = vec_env.sum_path_ratio / vec_env.num_successful_with_ratio if vec_env.num_successful_with_ratio > 0 else float('nan')
-    mean_lpc = sum(rd[2] for rd in routing_data) / len(routing_data) if routing_data else 0.0
+    mean_lpc = sum(rd[2] for rd in routing_data) / len(routing_data) if routing_data else 0.0  # rd[2] is lpc
 
     metrics = {
         'success_rate': success_rate,
