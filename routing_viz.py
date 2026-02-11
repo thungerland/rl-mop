@@ -131,8 +131,10 @@ def _(Path, checkpoint_dropdown, mo, np, num_envs_slider, num_episodes_slider, t
 def _(defaultdict, np, routing_data):
     # Aggregate routing data by position
     position_routing = defaultdict(list)
+    position_lpc = defaultdict(list)
     for _pos, _layer_routing, _lpc in routing_data:
         position_routing[_pos].append(_layer_routing)
+        position_lpc[_pos].append(_lpc)
 
     # Compute average routing weights per position
     avg_routing_by_pos = {}
@@ -141,6 +143,9 @@ def _(defaultdict, np, routing_data):
             _layer: np.mean([r[_layer] for r in _routings], axis=0)
             for _layer in _routings[0].keys()
         }
+
+    # Compute average LPC per position
+    avg_lpc_by_pos = {_pos: np.mean(_lpcs) for _pos, _lpcs in position_lpc.items()}
 
     # Get grid bounds
     all_positions = list(position_routing.keys())
@@ -159,6 +164,7 @@ def _(defaultdict, np, routing_data):
 
     (grid_width, grid_height, num_layers, num_experts_per_layer, x_min, y_min)
     return (
+        avg_lpc_by_pos,
         avg_routing_by_pos,
         grid_height,
         grid_width,
@@ -185,6 +191,8 @@ def _(task_id, torch):
 
 @app.cell
 def _(
+    Path,
+    avg_lpc_by_pos,
     avg_routing_by_pos,
     env_image,
     grid_height,
@@ -193,16 +201,14 @@ def _(
     np,
     num_experts_per_layer,
     plt,
+    task_id,
     x_min,
     y_min,
 ):
-    # Create visualization with environment render and routing heatmaps
+    # Create visualization with environment render, routing heatmaps, and LPC heatmap
     _num_heatmaps = len(layer_names)
-    _fig, _axes = plt.subplots(1, _num_heatmaps + 1, figsize=(5 * (_num_heatmaps + 1), 5))
-
-    # Handle single heatmap case (axes not iterable)
-    if _num_heatmaps == 0:
-        _axes = [_axes]
+    # +1 for environment, +1 for LPC heatmap
+    _fig_heatmap, _axes = plt.subplots(1, _num_heatmaps + 2, figsize=(5 * (_num_heatmaps + 2), 6))
 
     # Plot 1: Environment render
     _axes[0].imshow(env_image)
@@ -264,13 +270,29 @@ def _(
         _ax.grid(which='minor', color='white', linestyle='-', linewidth=0.5)
         _ax.tick_params(which='minor', size=0)
 
-    # Add colorbar for confidence scale (light = low confidence, dark = high confidence)
-    _cbar_ax = _fig.add_axes([0.92, 0.15, 0.02, 0.7])
-    _sm = plt.cm.ScalarMappable(cmap=plt.cm.Greys, norm=plt.Normalize(vmin=0.33, vmax=1.0))
-    _cbar = _fig.colorbar(_sm, cax=_cbar_ax)
-    _cbar.set_label('Confidence')
-    _cbar.set_ticks([0.33, 0.5, 0.67, 0.83, 1.0])
-    _cbar.set_ticklabels(['0.33', '0.5', '0.67', '0.83', '1.0'])
+    # LPC heatmap (last subplot)
+    _ax_lpc = _axes[-1]
+    _lpc_grid = np.full((grid_height, grid_width), np.nan)
+
+    for _pos, _lpc in avg_lpc_by_pos.items():
+        _x, _y = _pos
+        _gx, _gy = _x - x_min, _y - y_min
+        _lpc_grid[_gy, _gx] = _lpc
+
+    _lpc_im = _ax_lpc.imshow(_lpc_grid, origin='upper', cmap='viridis')
+    _ax_lpc.set_title("Mean LPC by Position")
+    _ax_lpc.set_xlabel("X")
+    _ax_lpc.set_ylabel("Y")
+
+    # Add grid lines
+    _ax_lpc.set_xticks(np.arange(-0.5, grid_width, 1), minor=True)
+    _ax_lpc.set_yticks(np.arange(-0.5, grid_height, 1), minor=True)
+    _ax_lpc.grid(which='minor', color='white', linestyle='-', linewidth=0.5)
+    _ax_lpc.tick_params(which='minor', size=0)
+
+    # Add colorbar for LPC
+    _lpc_cbar = _fig_heatmap.colorbar(_lpc_im, ax=_ax_lpc, shrink=0.8)
+    _lpc_cbar.set_label('LPC')
 
     # Add legend for expert colors
     _legend_elements = [
@@ -279,49 +301,40 @@ def _(
                    markersize=12, label=f'Expert {i}')
         for i in range(max(num_experts_per_layer))
     ]
-    _fig.legend(handles=_legend_elements, loc='lower center', ncol=max(num_experts_per_layer),
-               bbox_to_anchor=(0.45, -0.02))
+    _fig_heatmap.legend(handles=_legend_elements, loc='lower center', ncol=max(num_experts_per_layer),
+               bbox_to_anchor=(0.4, -0.02))
 
-    plt.tight_layout(rect=[0, 0.05, 0.9, 1])
+    plt.tight_layout(rect=[0, 0.05, 1, 1])
     plt.gca()
+    fig_heatmap = _fig_heatmap
+    return (fig_heatmap,)
+
+
+@app.cell
+def _(fig_heatmap, mo):
+    mo.mpl.interactive(fig_heatmap)
     return
 
 
 @app.cell
-def _(avg_routing_by_pos, layer_names, plt):
-    # Detailed bar chart showing routing distribution at each position
-    # Select a few representative positions
-    _positions = list(avg_routing_by_pos.keys())
-    _num_positions_to_show = min(9, len(_positions))
-    _sample_positions = _positions[::max(1, len(_positions) // _num_positions_to_show)][:_num_positions_to_show]
+def _(mo):
+    # Save plots button
+    save_button = mo.ui.run_button(label="Save Plots")
+    save_button
+    return (save_button,)
 
-    _fig2, _axes2 = plt.subplots(
-        len(_sample_positions), len(layer_names),
-        figsize=(4 * len(layer_names), 2 * len(_sample_positions))
-    )
 
-    if len(layer_names) == 1:
-        _axes2 = _axes2.reshape(-1, 1)
-    if len(_sample_positions) == 1:
-        _axes2 = _axes2.reshape(1, -1)
+@app.cell
+def _(Path, fig_heatmap, mo, save_button, task_id):
+    # Handle save action
+    _save_result = None
+    if save_button.value:
+        _plot_dir = Path("plots") / task_id
+        _plot_dir.mkdir(parents=True, exist_ok=True)
+        fig_heatmap.savefig(_plot_dir / "routing_heatmap.png", dpi=150, bbox_inches='tight')
+        _save_result = f"Saved to {_plot_dir}/"
 
-    for _pos_idx, _pos in enumerate(_sample_positions):
-        _routing = avg_routing_by_pos[_pos]
-        for _layer_idx, _layer_name in enumerate(layer_names):
-            _ax2 = _axes2[_pos_idx, _layer_idx]
-            _weights = _routing[_layer_name]
-            _ax2.bar(range(len(_weights)), _weights, color=plt.cm.tab10.colors[:len(_weights)])
-            _ax2.set_ylim(0, 1)
-            _ax2.set_xlabel("Expert")
-            _ax2.set_ylabel("Weight")
-            if _pos_idx == 0:
-                _ax2.set_title(_layer_name)
-            if _layer_idx == 0:
-                _ax2.set_ylabel(f"Pos {_pos}\nWeight")
-
-    _fig2.suptitle("Routing Distribution by Position", fontsize=14)
-    plt.tight_layout()
-    plt.gca()
+    mo.md(f"**{_save_result}**") if _save_result else None
     return
 
 

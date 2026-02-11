@@ -64,6 +64,9 @@ logs/
 # Evaluation cache (routing data JSON files)
 evaluation_cache/
 
+# Saved plots
+plots/
+
 # Data
 data/
 *.csv
