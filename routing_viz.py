@@ -81,7 +81,7 @@ def _(Path, checkpoint_dropdown, mo, np, num_envs_slider, num_episodes_slider, t
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Load checkpoint to get config
-    policy, config = load_checkpoint(checkpoint_dropdown.value, device)
+    policy, config, _ = load_checkpoint(checkpoint_dropdown.value, device)
     task_id = config['task_id']
     trial = config['trial']
 

@@ -495,7 +495,7 @@ def train_unroll_moe(policy, optimizer, vec_env, h, unroll_len, device, lpc_alph
     return h, avg_loss.item(), avg_acc, avg_lpc
 
 
-def save_checkpoint(policy, optimizer, config, update, checkpoint_dir, task_id, trial):
+def save_checkpoint(policy, optimizer, config, update, checkpoint_dir, task_id, trial, lang_proj_state_dict):
     """
     Save model checkpoint to disk.
 
@@ -512,6 +512,7 @@ def save_checkpoint(policy, optimizer, config, update, checkpoint_dir, task_id, 
         'optimizer_state_dict': optimizer.state_dict(),
         'config': config,
         'update': update,
+        'lang_proj_state_dict': lang_proj_state_dict,
     }
 
     torch.save(checkpoint, checkpoint_path)
@@ -749,7 +750,7 @@ def main():
 
     # Save final checkpoint
     checkpoint_dir = args.checkpoint_dir
-    save_checkpoint(policy, optimizer, config, num_updates, checkpoint_dir, task_id, trial)
+    save_checkpoint(policy, optimizer, config, num_updates, checkpoint_dir, task_id, trial, vec_env.lang_proj.state_dict())
 
     wandb.finish()
 

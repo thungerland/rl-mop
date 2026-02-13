@@ -209,11 +209,15 @@ def main():
     for checkpoint_path in tqdm(to_evaluate, desc="Evaluating checkpoints"):
         try:
             # Load model
-            policy, config = load_checkpoint(str(checkpoint_path), device)
+            policy, config, lang_proj_state_dict = load_checkpoint(str(checkpoint_path), device)
             task_id = config['task_id']
 
             # Create evaluation environment
             vec_env = EvalVectorEnv(task_id, args.num_envs, device)
+
+            # Load lang_proj weights if available
+            if lang_proj_state_dict is not None:
+                vec_env.load_lang_proj(lang_proj_state_dict)
 
             # Run evaluation
             metrics, routing_data = evaluate(policy, vec_env, args.num_episodes, device)

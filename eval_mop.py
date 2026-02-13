@@ -104,6 +104,13 @@ class EvalVectorEnv:
 
         self.action_space = self.envs[0].action_space
 
+    def load_lang_proj(self, state_dict):
+        """Load lang_proj weights from checkpoint and re-encode all missions."""
+        self.lang_proj.load_state_dict(state_dict)
+        # Re-encode all missions with the correct lang_proj weights
+        for i, mission in enumerate(self.missions):
+            self.lang_embs[i] = self._encode_mission(mission)
+
     def _add_carrying_flag(self, env, obs: dict) -> dict:
         base = getattr(env, "unwrapped", env)
         obs["carrying_flag"] = 0 if getattr(base, "carrying", None) is None else 1
@@ -316,7 +323,13 @@ def encode_obs_batch(obs_list, device):
 
 
 def load_checkpoint(checkpoint_path, device):
-    """Load checkpoint and reconstruct policy."""
+    """Load checkpoint and reconstruct policy.
+
+    Returns:
+        policy: MixtureOfExpertsPolicy with loaded weights
+        config: dict with training config
+        lang_proj_state_dict: state dict for lang_proj layer (or None if not saved)
+    """
     checkpoint = torch.load(checkpoint_path, map_location=device)
     config = checkpoint['config']
 
@@ -333,7 +346,10 @@ def load_checkpoint(checkpoint_path, device):
     policy.load_state_dict(checkpoint['policy_state_dict'])
     policy.eval()
 
-    return policy, config
+    # Extract lang_proj weights if saved (for backwards compatibility)
+    lang_proj_state_dict = checkpoint.get('lang_proj_state_dict', None)
+
+    return policy, config, lang_proj_state_dict
 
 
 def evaluate(policy, vec_env, num_episodes, device):
@@ -460,7 +476,7 @@ def main():
 
     # Load checkpoint
     print(f"Loading checkpoint: {args.checkpoint}")
-    policy, config = load_checkpoint(args.checkpoint, device)
+    policy, config, lang_proj_state_dict = load_checkpoint(args.checkpoint, device)
 
     # Use training task if not specified
     task_id = args.task_id or config['task_id']
@@ -468,6 +484,13 @@ def main():
 
     # Create evaluation environment
     vec_env = EvalVectorEnv(task_id, args.num_envs, device)
+
+    # Load lang_proj weights if available
+    if lang_proj_state_dict is not None:
+        vec_env.load_lang_proj(lang_proj_state_dict)
+        print("Loaded lang_proj weights from checkpoint")
+    else:
+        print("Warning: No lang_proj weights in checkpoint, using random initialization")
 
     # Run evaluation
     metrics, routing_data = evaluate(policy, vec_env, args.num_episodes, device)
