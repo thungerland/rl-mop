@@ -380,26 +380,59 @@ def group_routing_data(routing_data: list, group_by: str) -> dict[tuple, list]:
     return dict(groups)
 
 
-def room_label(room_top: tuple, room_grid_shape: tuple = None) -> str:
-    """
-    Convert room top-left position to a human-readable label.
+def _positional_names(n: int, axis: str) -> list[str]:
+    """Generate positional names for a grid axis.
 
     Args:
-        room_top: (top_x, top_y) position of the room's top-left corner
-        room_grid_shape: (num_cols, num_rows) if known, used for positional names
+        n: Number of positions along this axis
+        axis: 'row' for Top/Bottom, 'col' for Left/Right
     """
-    if room_grid_shape is not None:
-        num_cols, num_rows = room_grid_shape
-        # Estimate room index from top position and grid shape
-        # Room positions typically follow a regular pattern
-        row_names = {0: 'Top', num_rows - 1: 'Bottom'}
-        col_names = {0: 'Left', num_cols - 1: 'Right'}
+    if axis == 'row':
+        ends = ('Top', 'Bottom')
+    else:
+        ends = ('Left', 'Right')
+    if n == 1:
+        return ['Center']
+    if n == 2:
+        return list(ends)
+    if n == 3:
+        return [ends[0], 'Center', ends[1]]
+    return [ends[0]] + [f'{axis.title()} {i}' for i in range(1, n - 1)] + [ends[1]]
 
-        # We need to figure out which room index this is
-        # Since room_top is pixel coords, we need to find the index
-        # For now, just use the raw position
-        return f"Room at {room_top}"
-    return f"Room at {room_top}"
+
+def room_labels_for_groups(sorted_keys: list, room_grid_shape: tuple = None) -> dict:
+    """Map room top-left keys to human-readable labels like 'Top-Left', 'Center'.
+
+    Args:
+        sorted_keys: List of room_top tuples, sorted
+        room_grid_shape: (num_cols, num_rows) if known
+
+    Returns:
+        Dict mapping room_key -> label string
+    """
+    if room_grid_shape is None or not sorted_keys:
+        return {k: f"Room at {k}" for k in sorted_keys}
+
+    num_cols, num_rows = room_grid_shape
+    xs = sorted(set(k[0] for k in sorted_keys))
+    ys = sorted(set(k[1] for k in sorted_keys))
+    x_to_col = {x: i for i, x in enumerate(xs)}
+    y_to_row = {y: j for j, y in enumerate(ys)}
+
+    row_names = _positional_names(num_rows, 'row')
+    col_names = _positional_names(num_cols, 'col')
+
+    labels = {}
+    for key in sorted_keys:
+        col_idx = x_to_col[key[0]]
+        row_idx = y_to_row[key[1]]
+        r = row_names[row_idx] if row_idx < len(row_names) else f"Row {row_idx}"
+        c = col_names[col_idx] if col_idx < len(col_names) else f"Col {col_idx}"
+        if r == 'Center' and c == 'Center':
+            labels[key] = 'Center'
+        else:
+            labels[key] = f"{r}-{c}"
+    return labels
 
 
 def plot_grouped_routing(
@@ -407,6 +440,7 @@ def plot_grouped_routing(
     group_by: str,
     env_image: np.ndarray = None,
     env_mission: str = "",
+    room_env_images: dict = None,
     max_groups: int = 9,
 ) -> plt.Figure:
     """
@@ -418,8 +452,9 @@ def plot_grouped_routing(
     Args:
         routing_data: List of (position, layer_routing, lpc, env_context) tuples
         group_by: Field in env_context to group by (e.g., 'agent_start_room')
-        env_image: Optional environment render (shown in first column of each row)
-        env_mission: Optional mission string
+        env_image: Optional fallback environment render
+        env_mission: Optional fallback mission string
+        room_env_images: Optional dict mapping group_key -> (image, mission) per group
         max_groups: Maximum number of groups to display
 
     Returns:
@@ -484,6 +519,12 @@ def plot_grouped_routing(
 
     lpc_im = None  # Track for colorbar
 
+    # Compute human-readable labels for all groups
+    if group_by == 'agent_start_room':
+        group_labels = room_labels_for_groups(sorted_keys, room_grid_shape)
+    else:
+        group_labels = {k: f"{group_by}={k}" for k in sorted_keys}
+
     for row_idx, group_key in enumerate(sorted_keys):
         group_data = groups[group_key]
         avg_routing, avg_lpc, _ = aggregate_routing_by_position(group_data)
@@ -492,24 +533,23 @@ def plot_grouped_routing(
             continue
 
         col_idx = 0
+        label = group_labels[group_key]
 
-        # Row label
-        if group_by == 'agent_start_room':
-            label = room_label(group_key, room_grid_shape)
-        else:
-            label = f"{group_by}={group_key}"
-
-        # Environment image
+        # Environment image (per-room if available, otherwise fallback)
         if has_env_image:
+            if room_env_images and group_key in room_env_images:
+                row_image, row_mission = room_env_images[group_key]
+            else:
+                row_image, row_mission = env_image, env_mission
+
             ax = fig.add_subplot(gs[row_idx, col_idx])
-            ax.imshow(env_image)
+            ax.imshow(row_image)
             ax.set_xticks([])
             ax.set_yticks([])
             ax.set_ylabel(f"{label}\n({len(group_data)} samples)", fontsize=9)
+            ax.set_xlabel(row_mission, fontsize=8)
             if row_idx == 0:
                 ax.set_title("Environment Layout")
-                if env_mission:
-                    ax.set_xlabel(env_mission, fontsize=8)
             col_idx += 1
 
         # Routing heatmaps for each layer

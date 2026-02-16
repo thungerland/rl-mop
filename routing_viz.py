@@ -15,10 +15,11 @@ def _():
     from plotting_utils import (
         plot_overall_routing,
         plot_grouped_routing,
+        group_routing_data,
         get_available_analyses,
     )
 
-    return Path, get_available_analyses, mo, np, plot_grouped_routing, plot_overall_routing, plt, torch
+    return Path, get_available_analyses, group_routing_data, mo, np, plot_grouped_routing, plot_overall_routing, plt, torch
 
 
 @app.cell
@@ -164,26 +165,51 @@ def _(get_available_analyses, mo, routing_data):
 
 
 @app.cell
-def _(task_id):
+def _(group_routing_data, routing_data, task_id):
     import gymnasium as gym
 
-    # Render a sample environment for reference
     sample_env = gym.make(task_id, render_mode="rgb_array")
-    obs, _ = sample_env.reset()
-    env_image = sample_env.unwrapped.get_frame(tile_size=32, agent_pov=False, highlight=False)
-    env_mission = obs.get("mission", "") if isinstance(obs, dict) else ""
+    uw = sample_env.unwrapped
+
+    # Collect room keys from routing data for per-room image generation
+    groups = group_routing_data(routing_data, 'agent_start_room')
+    target_rooms = set(groups.keys())
+
+    # Generate one env image per starting room by resetting until we cover all rooms
+    room_env_images = {}
+    env_image = None
+    env_mission = ""
+
+    for _ in range(200):
+        obs, _ = sample_env.reset()
+        env_image = uw.get_frame(tile_size=32, agent_pov=False, highlight=False)
+        env_mission = obs.get("mission", "") if isinstance(obs, dict) else ""
+
+        if hasattr(uw, 'room_from_pos'):
+            try:
+                room = uw.room_from_pos(*uw.agent_pos)
+                room_key = tuple(int(c) for c in room.top)
+                if room_key in target_rooms and room_key not in room_env_images:
+                    room_env_images[room_key] = (env_image, env_mission)
+            except Exception:
+                pass
+
+        if len(room_env_images) >= len(target_rooms):
+            break
+
     sample_env.close()
-    return env_image, env_mission
+    return env_image, env_mission, room_env_images
 
 
 @app.cell
-def _(analysis_dropdown, env_image, env_mission, plot_grouped_routing, plot_overall_routing, routing_data):
+def _(analysis_dropdown, env_image, env_mission, plot_grouped_routing, plot_overall_routing, room_env_images, routing_data):
     if analysis_dropdown.value == 'by_starting_room':
         fig_heatmap = plot_grouped_routing(
             routing_data=routing_data,
             group_by='agent_start_room',
             env_image=env_image,
             env_mission=env_mission,
+            room_env_images=room_env_images,
         )
     else:
         fig_heatmap = plot_overall_routing(
