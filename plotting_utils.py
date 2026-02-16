@@ -6,18 +6,27 @@ Provides reusable functions for aggregating routing data and creating heatmaps.
 
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+import matplotlib.gridspec as gridspec
 from collections import defaultdict
 from typing import Callable
 
 
-# Expert colormaps for consistent visualization across all plots
+def _make_expert_cmap(light_color, dark_color, name):
+    """Create a colormap from a light to dark shade for expert confidence gradients."""
+    return mcolors.LinearSegmentedColormap.from_list(name, [light_color, dark_color], N=256)
+
+
+# Expert colormaps: intensity reflects expert complexity.
+# Expert 0 (identity/skip) is mildest, higher experts are progressively more vivid.
+# Each colormap provides a gradient from light (low confidence) to dark (high confidence).
 EXPERT_CMAPS = [
-    plt.cm.Blues,    # Expert 0: blue
-    plt.cm.Oranges,  # Expert 1: orange
-    plt.cm.Greens,   # Expert 2: green
-    plt.cm.Reds,     # Expert 3: red
-    plt.cm.Purples,  # Expert 4: purple
-    plt.cm.Greys,    # Expert 5: grey
+    _make_expert_cmap('#d4e6f1', '#7fb3d8', 'expert0_light_blue'),   # Expert 0: soft pastel blue
+    _make_expert_cmap('#c3a6d6', '#8e44ad', 'expert1_purple'),       # Expert 1: medium purple
+    _make_expert_cmap('#f1948a', '#c0392b', 'expert2_red'),          # Expert 2: strong red
+    _make_expert_cmap('#f0b27a', '#e67e22', 'expert3_orange'),       # Expert 3: orange
+    _make_expert_cmap('#82e0aa', '#27ae60', 'expert4_green'),        # Expert 4: green
+    _make_expert_cmap('#aab7b8', '#515a5a', 'expert5_grey'),         # Expert 5: grey
 ]
 
 # Color for unvisited cells
@@ -211,6 +220,7 @@ def render_lpc_heatmap(ax, avg_lpc_by_pos: dict, grid_info: dict):
 def plot_overall_routing(
     routing_data: list,
     env_image: np.ndarray = None,
+    env_mission: str = "",
     filter_fn: Callable = None,
     title_suffix: str = ""
 ) -> plt.Figure:
@@ -223,6 +233,7 @@ def plot_overall_routing(
     Args:
         routing_data: List of (position, layer_routing, lpc, env_context) tuples
         env_image: Optional environment render to show
+        env_mission: Optional language instruction to show under the environment image
         filter_fn: Optional function to filter samples before aggregation
         title_suffix: Optional suffix to add to figure title
 
@@ -254,9 +265,22 @@ def plot_overall_routing(
     if env_image is not None:
         num_plots += 1
 
-    fig, axes = plt.subplots(1, num_plots, figsize=(5 * num_plots, 6))
-    if num_plots == 1:
-        axes = [axes]
+    num_experts = max(num_experts_per_layer)
+
+    # GridSpec layout: top row has main plots + narrow LPC colorbar column,
+    # bottom row has expert colorbars spanning the full width.
+    # The LPC colorbar gets its own column so it doesn't steal from the LPC plot.
+    num_cols = num_plots + 1  # +1 for dedicated LPC colorbar column
+    fig = plt.figure(figsize=(5 * num_plots, 7))
+    gs = gridspec.GridSpec(
+        2, num_cols,
+        height_ratios=[1, 0.04],
+        width_ratios=[1] * num_plots + [0.05],
+        hspace=0.08, wspace=0.35,
+    )
+
+    # Main plot axes (top row)
+    axes = [fig.add_subplot(gs[0, i]) for i in range(num_plots)]
 
     plot_idx = 0
 
@@ -264,7 +288,12 @@ def plot_overall_routing(
     if env_image is not None:
         axes[plot_idx].imshow(env_image)
         axes[plot_idx].set_title("Environment Layout")
-        axes[plot_idx].axis('off')
+        if env_mission:
+            axes[plot_idx].set_xlabel(env_mission, fontsize=9)
+            axes[plot_idx].set_xticks([])
+            axes[plot_idx].set_yticks([])
+        else:
+            axes[plot_idx].axis('off')
         plot_idx += 1
 
     # Routing heatmaps for each layer
@@ -272,22 +301,28 @@ def plot_overall_routing(
         render_routing_heatmap(axes[plot_idx], avg_routing_by_pos, grid_info, layer_name)
         plot_idx += 1
 
-    # LPC heatmap
+    # LPC heatmap with its own dedicated colorbar column
     lpc_im = render_lpc_heatmap(axes[plot_idx], avg_lpc_by_pos, grid_info)
-    lpc_cbar = fig.colorbar(lpc_im, ax=axes[plot_idx], shrink=0.8)
+    lpc_cbar_ax = fig.add_subplot(gs[0, num_plots])
+    lpc_cbar = fig.colorbar(lpc_im, cax=lpc_cbar_ax)
     lpc_cbar.set_label('LPC')
 
-    # Add legend for expert colors
-    legend_elements = [
-        plt.Line2D([0], [0], marker='s', color='w',
-                   markerfacecolor=EXPERT_CMAPS[i](0.7)[:3],
-                   markersize=12, label=f'Expert {i}')
-        for i in range(max(num_experts_per_layer))
-    ]
-    fig.legend(handles=legend_elements, loc='lower center', ncol=max(num_experts_per_layer),
-               bbox_to_anchor=(0.4, -0.02))
+    # Expert colorbars along the bottom row, spanning the main plot columns
+    for i in range(num_experts):
+        cbar_ax = fig.add_subplot(gs[1, i])
+        norm = mcolors.Normalize(vmin=0.3, vmax=1.0)
+        sm = plt.cm.ScalarMappable(cmap=EXPERT_CMAPS[i], norm=norm)
+        sm.set_array([])
+        cb = fig.colorbar(sm, cax=cbar_ax, orientation='horizontal')
+        cb.set_label(f'Expert {i}', fontsize=9)
+        cb.set_ticks([0.3, 0.5, 0.7, 0.9])
+        cb.set_ticklabels(['0.3', '0.5', '0.7', '0.9'])
+        cb.ax.tick_params(labelsize=7)
 
-    plt.tight_layout(rect=[0, 0.05, 1, 1])
+    # Hide any unused bottom-row cells
+    for i in range(num_experts, num_cols):
+        ax_empty = fig.add_subplot(gs[1, i])
+        ax_empty.axis('off')
 
     return fig
 
@@ -296,13 +331,11 @@ def get_available_analyses(routing_data: list) -> list[str]:
     """
     Determine which analysis types are available based on the routing data.
 
-    Returns a list of available analysis type names.
-
     Args:
         routing_data: List of (position, layer_routing, lpc, env_context) tuples
 
     Returns:
-        List of available analysis names (e.g., ['overall', 'by_target_quadrant', 'by_door_position'])
+        List of available analysis names (e.g., ['overall', 'by_starting_room'])
     """
     available = ['overall']
 
@@ -315,16 +348,210 @@ def get_available_analyses(routing_data: list) -> list[str]:
     if not env_context:
         return available
 
-    # Check for target-related fields (balls are often targets in BabyAI)
-    if env_context.get('balls') or env_context.get('goals'):
-        available.append('by_target_quadrant')
-
-    # Check for doors
-    if env_context.get('doors'):
-        available.append('by_door_position')
-
-    # Check for keys
-    if env_context.get('keys'):
-        available.append('by_key_position')
+    # Check for room-based grouping
+    if env_context.get('agent_start_room') is not None:
+        available.append('by_starting_room')
 
     return available
+
+
+def group_routing_data(routing_data: list, group_by: str) -> dict[tuple, list]:
+    """
+    Group routing data by a field in env_context.
+
+    Args:
+        routing_data: List of (position, layer_routing, lpc, env_context) tuples
+        group_by: Field name in env_context to group by (e.g., 'agent_start_room')
+
+    Returns:
+        Dict mapping group_key -> list of samples in that group.
+        Keys are tuples for hashability.
+    """
+    groups = defaultdict(list)
+    for sample in routing_data:
+        pos, layer_routing, lpc, env_context = sample
+        key = env_context.get(group_by)
+        if key is not None:
+            if isinstance(key, list):
+                key = tuple(key)
+            elif not isinstance(key, tuple):
+                key = (key,)
+            groups[key].append(sample)
+    return dict(groups)
+
+
+def room_label(room_top: tuple, room_grid_shape: tuple = None) -> str:
+    """
+    Convert room top-left position to a human-readable label.
+
+    Args:
+        room_top: (top_x, top_y) position of the room's top-left corner
+        room_grid_shape: (num_cols, num_rows) if known, used for positional names
+    """
+    if room_grid_shape is not None:
+        num_cols, num_rows = room_grid_shape
+        # Estimate room index from top position and grid shape
+        # Room positions typically follow a regular pattern
+        row_names = {0: 'Top', num_rows - 1: 'Bottom'}
+        col_names = {0: 'Left', num_cols - 1: 'Right'}
+
+        # We need to figure out which room index this is
+        # Since room_top is pixel coords, we need to find the index
+        # For now, just use the raw position
+        return f"Room at {room_top}"
+    return f"Room at {room_top}"
+
+
+def plot_grouped_routing(
+    routing_data: list,
+    group_by: str,
+    env_image: np.ndarray = None,
+    env_mission: str = "",
+    max_groups: int = 9,
+) -> plt.Figure:
+    """
+    Create a multi-row figure with one row of heatmaps per group.
+
+    Each row shows: [env_image | layer_0 | layer_1 | ... | LPC]
+    Row labels indicate the group (e.g., which starting room).
+
+    Args:
+        routing_data: List of (position, layer_routing, lpc, env_context) tuples
+        group_by: Field in env_context to group by (e.g., 'agent_start_room')
+        env_image: Optional environment render (shown in first column of each row)
+        env_mission: Optional mission string
+        max_groups: Maximum number of groups to display
+
+    Returns:
+        matplotlib Figure object
+    """
+    groups = group_routing_data(routing_data, group_by)
+
+    if not groups:
+        fig, ax = plt.subplots(1, 1, figsize=(6, 4))
+        ax.text(0.5, 0.5, f"No data for grouping by '{group_by}'",
+                ha='center', va='center', fontsize=14)
+        ax.axis('off')
+        return fig
+
+    # Sort groups by key for consistent ordering
+    sorted_keys = sorted(groups.keys())[:max_groups]
+    num_groups = len(sorted_keys)
+
+    # Get room_grid_shape from first sample (for room labels)
+    _, _, _, first_ctx = routing_data[0]
+    room_grid_shape = first_ctx.get('room_grid_shape')
+
+    # Aggregate each group to determine layer names and num_experts
+    first_avg, _, layer_names = aggregate_routing_by_position(groups[sorted_keys[0]])
+    if not first_avg:
+        fig, ax = plt.subplots(1, 1, figsize=(6, 4))
+        ax.text(0.5, 0.5, "No visited positions in first group",
+                ha='center', va='center', fontsize=14)
+        ax.axis('off')
+        return fig
+
+    sample_routing = list(first_avg.values())[0]
+    num_experts = max(len(sample_routing[ln]) for ln in layer_names)
+
+    # Layout: columns = [env_image?] + [layer heatmaps] + [LPC] + [LPC colorbar]
+    num_main_cols = len(layer_names) + 1  # layers + LPC
+    has_env_image = env_image is not None
+    if has_env_image:
+        num_main_cols += 1
+
+    num_cols = num_main_cols + 1  # +1 for LPC colorbar column
+
+    # Figure dimensions
+    col_width = 4.5
+    row_height = 4.5
+    fig = plt.figure(figsize=(col_width * num_main_cols, row_height * num_groups + 1.2))
+
+    # GridSpec: num_groups rows for data + 1 row for expert colorbars
+    height_ratios = [1] * num_groups + [0.04]
+    width_ratios = [1] * num_main_cols + [0.05]
+
+    gs = gridspec.GridSpec(
+        num_groups + 1, num_cols,
+        height_ratios=height_ratios,
+        width_ratios=width_ratios,
+        hspace=0.35, wspace=0.35,
+    )
+
+    # Compute grid bounds from ALL data (so all rows share the same coordinate system)
+    all_positions = [sample[0] for sample in routing_data]
+    global_grid_info = compute_grid_bounds(all_positions)
+
+    lpc_im = None  # Track for colorbar
+
+    for row_idx, group_key in enumerate(sorted_keys):
+        group_data = groups[group_key]
+        avg_routing, avg_lpc, _ = aggregate_routing_by_position(group_data)
+
+        if not avg_routing:
+            continue
+
+        col_idx = 0
+
+        # Row label
+        if group_by == 'agent_start_room':
+            label = room_label(group_key, room_grid_shape)
+        else:
+            label = f"{group_by}={group_key}"
+
+        # Environment image
+        if has_env_image:
+            ax = fig.add_subplot(gs[row_idx, col_idx])
+            ax.imshow(env_image)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            ax.set_ylabel(f"{label}\n({len(group_data)} samples)", fontsize=9)
+            if row_idx == 0:
+                ax.set_title("Environment Layout")
+                if env_mission:
+                    ax.set_xlabel(env_mission, fontsize=8)
+            col_idx += 1
+
+        # Routing heatmaps for each layer
+        for layer_name in layer_names:
+            ax = fig.add_subplot(gs[row_idx, col_idx])
+            render_routing_heatmap(ax, avg_routing, global_grid_info, layer_name)
+            if row_idx == 0:
+                ax.set_title(f"{layer_name}\n(color=expert, intensity=confidence)")
+            else:
+                ax.set_title("")
+            if not has_env_image and col_idx == 0:
+                ax.set_ylabel(f"{label}\n({len(group_data)} samples)", fontsize=9)
+            col_idx += 1
+
+        # LPC heatmap
+        ax = fig.add_subplot(gs[row_idx, col_idx])
+        lpc_im = render_lpc_heatmap(ax, avg_lpc, global_grid_info)
+        if row_idx == 0:
+            ax.set_title("Mean LPC by Position")
+        else:
+            ax.set_title("")
+
+    # LPC colorbar in the dedicated column (spanning all data rows)
+    if lpc_im is not None:
+        lpc_cbar_ax = fig.add_subplot(gs[:num_groups, num_main_cols])
+        fig.colorbar(lpc_im, cax=lpc_cbar_ax).set_label('LPC')
+
+    # Expert colorbars along the bottom row
+    for i in range(num_experts):
+        cbar_ax = fig.add_subplot(gs[num_groups, i])
+        norm = mcolors.Normalize(vmin=0.3, vmax=1.0)
+        sm = plt.cm.ScalarMappable(cmap=EXPERT_CMAPS[i], norm=norm)
+        sm.set_array([])
+        cb = fig.colorbar(sm, cax=cbar_ax, orientation='horizontal')
+        cb.set_label(f'Expert {i}', fontsize=9)
+        cb.set_ticks([0.3, 0.5, 0.7, 0.9])
+        cb.set_ticklabels(['0.3', '0.5', '0.7', '0.9'])
+        cb.ax.tick_params(labelsize=7)
+
+    # Hide unused bottom-row cells
+    for i in range(num_experts, num_cols):
+        ax_empty = fig.add_subplot(gs[num_groups, i])
+        ax_empty.axis('off')
+
+    return fig

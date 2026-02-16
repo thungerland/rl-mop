@@ -14,10 +14,11 @@ def _():
 
     from plotting_utils import (
         plot_overall_routing,
+        plot_grouped_routing,
         get_available_analyses,
     )
 
-    return Path, get_available_analyses, mo, np, plot_overall_routing, plt, torch
+    return Path, get_available_analyses, mo, np, plot_grouped_routing, plot_overall_routing, plt, torch
 
 
 @app.cell
@@ -142,19 +143,17 @@ def _(get_available_analyses, mo, routing_data):
     available_analyses = get_available_analyses(routing_data)
 
     analysis_options = {
-        'overall': 'Overall (all data)',
-        'by_target_quadrant': 'By target quadrant',
-        'by_door_position': 'By door position',
-        'by_key_position': 'By key position',
+        'Overall (all data)': 'overall',
+        'By starting room': 'by_starting_room',
     }
 
     # Filter to only available analyses
-    available_options = {k: v for k, v in analysis_options.items() if k in available_analyses}
+    available_options = {k: v for k, v in analysis_options.items() if v in available_analyses}
 
     analysis_dropdown = mo.ui.dropdown(
         options=available_options,
         label="Analysis Type",
-        value='overall'
+        value='Overall (all data)'
     )
 
     mo.vstack([
@@ -170,21 +169,28 @@ def _(task_id):
 
     # Render a sample environment for reference
     sample_env = gym.make(task_id, render_mode="rgb_array")
-    sample_env.reset()
+    obs, _ = sample_env.reset()
     env_image = sample_env.unwrapped.get_frame(tile_size=32, agent_pov=False, highlight=False)
+    env_mission = obs.get("mission", "") if isinstance(obs, dict) else ""
     sample_env.close()
-    return (env_image,)
+    return env_image, env_mission
 
 
 @app.cell
-def _(analysis_dropdown, env_image, plot_overall_routing, routing_data):
-    # Create visualization using plotting utilities
-    # Currently only 'overall' is implemented; other analysis types can be added
-    fig_heatmap = plot_overall_routing(
-        routing_data=routing_data,
-        env_image=env_image,
-        filter_fn=None,  # No filtering for 'overall' analysis
-    )
+def _(analysis_dropdown, env_image, env_mission, plot_grouped_routing, plot_overall_routing, routing_data):
+    if analysis_dropdown.value == 'by_starting_room':
+        fig_heatmap = plot_grouped_routing(
+            routing_data=routing_data,
+            group_by='agent_start_room',
+            env_image=env_image,
+            env_mission=env_mission,
+        )
+    else:
+        fig_heatmap = plot_overall_routing(
+            routing_data=routing_data,
+            env_image=env_image,
+            env_mission=env_mission,
+        )
     return (fig_heatmap,)
 
 

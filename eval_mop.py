@@ -169,6 +169,9 @@ class EvalVectorEnv:
 
         Returns a dict with:
             - grid_size: (width, height)
+            - agent_start_pos: (x, y) agent position at episode start
+            - agent_start_room: (top_x, top_y) room top-left corner (multi-room envs only)
+            - room_grid_shape: (num_cols, num_rows) room grid layout (multi-room envs only)
             - goals: list of (x, y, color) for Goal objects
             - doors: list of (x, y, color, is_open, is_locked)
             - keys: list of (x, y, color)
@@ -177,12 +180,23 @@ class EvalVectorEnv:
         """
         context = {
             'grid_size': (env.grid.width, env.grid.height),
+            'agent_start_pos': tuple(int(c) for c in env.agent_pos),
             'goals': [],
             'doors': [],
             'keys': [],
             'balls': [],
             'boxes': [],
         }
+
+        # Detect room info if this is a multi-room environment (e.g. BabyAI RoomGrid)
+        if hasattr(env, 'room_from_pos'):
+            try:
+                room = env.room_from_pos(*env.agent_pos)
+                context['agent_start_room'] = tuple(int(c) for c in room.top)
+                if hasattr(env, 'room_grid'):
+                    context['room_grid_shape'] = (len(env.room_grid[0]), len(env.room_grid))
+            except Exception:
+                pass
 
         for j in range(env.grid.height):
             for i in range(env.grid.width):
