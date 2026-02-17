@@ -226,7 +226,7 @@ class MixtureOfExpertsPolicy(nn.Module):
         expert_hidden_sizes: List,  # List[int] for single layer, List[List[int]] for multi-layer
         router_hidden_size: int,
         num_actions: int,
-        lang_dim: int = 128
+        lang_dim: int = 32
     ):
         """
         Args:

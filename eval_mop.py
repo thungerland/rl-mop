@@ -53,7 +53,7 @@ class EvalVectorEnv:
     Similar to VectorBabyAIEnv but without expert bots and with position tracking.
     """
 
-    def __init__(self, task_id: str, num_envs: int, device: torch.device):
+    def __init__(self, task_id: str, num_envs: int, device: torch.device, lang_dim: int = 32):
         from transformers import AutoTokenizer, AutoModel
         import torch.nn as nn
 
@@ -72,11 +72,11 @@ class EvalVectorEnv:
         for p in self.lang_encoder.parameters():
             p.requires_grad = False
 
-        self.lang_proj = nn.Linear(768, 128).to(device)
+        self.lang_proj = nn.Linear(768, lang_dim).to(device)
         for p in self.lang_proj.parameters():
             p.requires_grad = False
 
-        self.lang_embs = torch.zeros(num_envs, 128, device=device)
+        self.lang_embs = torch.zeros(num_envs, lang_dim, device=device)
 
         # Metrics
         self.episode_steps = np.zeros(num_envs, dtype=int)
@@ -84,6 +84,7 @@ class EvalVectorEnv:
         self.successful_episodes = 0
         self.sum_path_ratio = 0.0
         self.num_successful_with_ratio = 0
+        self.bot_plan_failures = 0
 
         # Create environments
         for i in range(num_envs):
@@ -144,15 +145,10 @@ class EvalVectorEnv:
         done = False
         truncated = False
 
-        try:
-            while not done and not truncated and steps < max_steps:
-                a = replan_with_timeout(bot, None, timeout_seconds=5)
-                _, _, done, truncated, _ = env_clone.step(a.value)
-                steps += 1
-        except (ReplanTimeout, AssertionError, Exception):
-            # Bot failed or timed out - return 1 as pessimistic fallback
-            # This makes path_ratio = agent_steps/1, showing agent as worse than optimal
-            return 1
+        while not done and not truncated and steps < max_steps:
+            a = replan_with_timeout(bot, None, timeout_seconds=5)
+            _, _, done, truncated, _ = env_clone.step(a.value)
+            steps += 1
 
         return steps
 
@@ -226,42 +222,45 @@ class EvalVectorEnv:
         """Get environment context for each environment."""
         return [self._extract_env_context(env) for env in self.envs]
 
-    def _reset_single_env(self, i: int, env):
-        """Reset a single environment and update internal state. Returns the observation."""
-        obs, _ = env.reset()
+    def _reset_single_env(self, i: int, env, max_retries=10):
+        """Reset a single environment, retrying if the expert bot can't plan.
 
-        mission = obs["mission"]
-        self.missions[i] = mission
-        self.lang_embs[i] = self._encode_mission(mission)
-
-        obs = obs.copy()
-        obs.pop('mission', None)
-        obs = self._add_carrying_flag(env, obs)
-
-        self.episode_steps[i] = 0
-        self.expert_steps[i] = self._compute_optimal_steps(env)
-
-        return obs
-
-    def reset(self):
-        """Reset all environments."""
-        self.obs_list = []
-        self.expert_steps = np.zeros(self.num_envs, dtype=int)
-
-        for i, env in enumerate(self.envs):
+        Each failure increments self.bot_plan_failures. Returns the observation.
+        """
+        for attempt in range(max_retries):
             obs, _ = env.reset()
 
             mission = obs["mission"]
-            self.missions[i] = mission
-            self.lang_embs[i] = self._encode_mission(mission)
-
             obs = obs.copy()
             obs.pop('mission', None)
             obs = self._add_carrying_flag(env, obs)
 
-            self.obs_list.append(obs)
+            try:
+                expert_steps = self._compute_optimal_steps(env)
+            except Exception as e:
+                self.bot_plan_failures += 1
+                print(f"[WARNING] Bot failed to plan on fresh {self.task_id} "
+                      f"(env {i}, attempt {attempt+1}/{max_retries}): {e}")
+                continue
+
+            self.missions[i] = mission
+            self.lang_embs[i] = self._encode_mission(mission)
             self.episode_steps[i] = 0
-            self.expert_steps[i] = self._compute_optimal_steps(env)
+            self.expert_steps[i] = expert_steps
+            return obs
+
+        raise RuntimeError(
+            f"Bot failed to plan on {max_retries} consecutive fresh resets "
+            f"of {self.task_id} (env {i}). Environment may be broken."
+        )
+
+    def reset(self):
+        """Reset all environments."""
+        self.obs_list = [None] * self.num_envs
+        self.expert_steps = np.zeros(self.num_envs, dtype=int)
+
+        for i, env in enumerate(self.envs):
+            self.obs_list[i] = self._reset_single_env(i, env)
 
         return list(self.obs_list)
 
@@ -296,17 +295,7 @@ class EvalVectorEnv:
                         self.num_successful_with_ratio += 1
 
                 # Reset this environment
-                obs, _ = env.reset()
-                mission = obs["mission"]
-                self.missions[i] = mission
-                self.lang_embs[i] = self._encode_mission(mission)
-
-                obs = obs.copy()
-                obs.pop('mission', None)
-                obs = self._add_carrying_flag(env, obs)
-
-                self.episode_steps[i] = 0
-                self.expert_steps[i] = self._compute_optimal_steps(env)
+                obs = self._reset_single_env(i, env)
 
             next_obs_list.append(obs)
 
@@ -354,7 +343,7 @@ def load_checkpoint(checkpoint_path, device):
         expert_hidden_sizes=config.get('expert_hidden_sizes', [32, 64, 128]),
         router_hidden_size=config.get('router_hidden_size', 64),
         num_actions=7,  # BabyAI default
-        lang_dim=config.get('lang_dim', 128)
+        lang_dim=config.get('lang_dim', 32)
     ).to(device)
 
     policy.load_state_dict(checkpoint['policy_state_dict'])
@@ -467,6 +456,7 @@ def evaluate(policy, vec_env, num_episodes, device):
         'mean_lpc': mean_lpc,
         'total_episodes': vec_env.total_episodes,
         'successful_episodes': vec_env.successful_episodes,
+        'bot_plan_failures': vec_env.bot_plan_failures,
     }
 
     return metrics, routing_data
@@ -497,7 +487,7 @@ def main():
     print(f"Evaluating on task: {task_id}")
 
     # Create evaluation environment
-    vec_env = EvalVectorEnv(task_id, args.num_envs, device)
+    vec_env = EvalVectorEnv(task_id, args.num_envs, device, lang_dim=config.get('lang_dim', 32))
 
     # Load lang_proj weights if available
     if lang_proj_state_dict is not None:
@@ -518,6 +508,7 @@ def main():
     print(f"Success Rate: {metrics['success_rate']:.2%}")
     print(f"Path Ratio: {metrics['path_ratio']:.2f}")
     print(f"Mean LPC: {metrics['mean_lpc']:.2f}")
+    print(f"Bot plan failures: {metrics['bot_plan_failures']}")
     print(f"Routing samples collected: {len(routing_data)}")
     print("="*50)
 

@@ -63,7 +63,7 @@ def load_existing_results(results_path: str) -> pd.DataFrame:
     # Return empty DataFrame with expected columns
     return pd.DataFrame(columns=[
         'checkpoint_path', 'task_id', 'trial', 'num_episodes',
-        'success_rate', 'path_ratio', 'mean_lpc',
+        'success_rate', 'path_ratio', 'mean_lpc', 'bot_plan_failures',
         'num_updates', 'unroll_len', 'lr', 'lpc_alpha',
         'expert_hidden_sizes', 'intermediate_dim', 'router_hidden_size',
         'max_steps', 'evaluated_at'
@@ -88,6 +88,7 @@ def build_result_row(checkpoint_path: Path, metrics: dict, config: dict, num_epi
         'success_rate': float(metrics['success_rate']),
         'path_ratio': float(metrics['path_ratio']),
         'mean_lpc': float(metrics['mean_lpc']),
+        'bot_plan_failures': int(metrics.get('bot_plan_failures', 0)),
         # Hyperparameters from config
         'num_updates': int(config.get('num_updates')) if config.get('num_updates') else None,
         'unroll_len': int(config.get('unroll_len')) if config.get('unroll_len') else None,
@@ -136,6 +137,7 @@ def save_routing_data(routing_data: list, checkpoint_path: Path, config: dict,
             'success_rate': float(metrics['success_rate']),
             'path_ratio': float(metrics['path_ratio']),
             'mean_lpc': float(metrics['mean_lpc']),
+            'bot_plan_failures': int(metrics.get('bot_plan_failures', 0)),
         },
         'routing_data': routing_json
     }
@@ -213,7 +215,7 @@ def main():
             task_id = config['task_id']
 
             # Create evaluation environment
-            vec_env = EvalVectorEnv(task_id, args.num_envs, device)
+            vec_env = EvalVectorEnv(task_id, args.num_envs, device, lang_dim=config.get('lang_dim', 32))
 
             # Load lang_proj weights if available
             if lang_proj_state_dict is not None:
@@ -235,7 +237,8 @@ def main():
             tqdm.write(f"  {task_id}/trial_{config['trial']}: "
                       f"success={metrics['success_rate']:.1%}, "
                       f"path_ratio={metrics['path_ratio']:.2f}, "
-                      f"lpc={metrics['mean_lpc']:.1f}")
+                      f"lpc={metrics['mean_lpc']:.1f}, "
+                      f"bot_plan_failures={metrics.get('bot_plan_failures', 0)}")
 
         except Exception as e:
             tqdm.write(f"Error evaluating {checkpoint_path}: {e}")

@@ -67,7 +67,7 @@ class VectorBabyAIEnv:
     - Auto-resets envs when they finish
     """
 
-    def __init__(self, task_id: str, num_envs: int, device: torch.device, max_steps: int = None):
+    def __init__(self, task_id: str, num_envs: int, device: torch.device, max_steps: int = None, lang_dim: int = 32):
 
         from transformers import AutoTokenizer, AutoModel
         self.task_id = task_id
@@ -102,16 +102,17 @@ class VectorBabyAIEnv:
         self.sum_path_ratio = 0.0
         self.num_successful_with_ratio = 0
         self.recent_path_ratios = deque(maxlen=50) # metric to track improvements in planning efficiency
+        self.bot_plan_failures = 0  # count of fresh-env resets where bot failed to plan
 
         for p in self.lang_encoder.parameters():
             p.requires_grad = False
 
-        self.lang_proj = nn.Linear(768, 128).to(device)
+        self.lang_proj = nn.Linear(768, lang_dim).to(device)
         for p in self.lang_proj.parameters():
             p.requires_grad = False
 
         # Initialise cache for language embeddings
-        self.lang_embs = torch.zeros(num_envs, 128, device=device)
+        self.lang_embs = torch.zeros(num_envs, lang_dim, device=device)
 
         # Create N envs + bots + initial states
         for i in range(num_envs):
@@ -175,46 +176,63 @@ class VectorBabyAIEnv:
         done = False
         truncated = False
 
-        try:
-            while not done and not truncated and steps < max_steps:
-                a = replan_with_timeout(bot, None, timeout_seconds=5)
-                _, _, done, truncated, _ = env_clone.step(a.value)
-                steps += 1
-        except (ReplanTimeout, AssertionError, Exception):
-            # Bot failed or timed out - return 1 as pessimistic fallback
-            # This makes path_ratio = agent_steps/1, showing agent as worse than optimal
-            return 1
+        while not done and not truncated and steps < max_steps:
+            a = replan_with_timeout(bot, None, timeout_seconds=5)
+            _, _, done, truncated, _ = env_clone.step(a.value)
+            steps += 1
 
         return steps
+
+    def _reset_single_env(self, i, max_retries=10):
+        """Reset env i, ensuring the expert bot can plan from the fresh state.
+
+        If the bot fails, re-reset (up to max_retries) until we get a solvable
+        instance.  Each failure increments self.bot_plan_failures so the count
+        is visible in wandb.
+        """
+        env = self.envs[i]
+
+        for attempt in range(max_retries):
+            obs, _ = env.reset()
+            mission = obs["mission"]
+            obs = obs.copy()
+            obs.pop('mission', None)
+            obs = self._add_carrying_flag(env, obs)
+
+            try:
+                expert_steps = self.compute_expert_steps_from_clone(env)
+            except Exception as e:
+                self.bot_plan_failures += 1
+                print(f"[WARNING] Bot failed to plan on fresh {self.task_id} "
+                      f"(env {i}, attempt {attempt+1}/{max_retries}): {e}")
+                continue
+
+            # Success — update all state for this env slot
+            self.obs_list[i] = obs
+            self.missions[i] = mission
+            self.lang_embs[i] = self._encode_mission(mission)
+            self.bots[i] = BabyAIBot(env)
+            self.expert_steps[i] = expert_steps
+            self.episode_steps[i] = 0
+            self.episode_success[i] = False
+            self.previous_actions[i] = None
+            return obs
+
+        raise RuntimeError(
+            f"Bot failed to plan on {max_retries} consecutive fresh resets "
+            f"of {self.task_id} (env {i}). Environment may be broken."
+        )
 
     def reset(self):
         """
         Reset all envs and return list of observations.
         Also re-creates the bots so they are synced with the new envs.
         """
-        self.obs_list = []
+        self.obs_list = [None] * self.num_envs
         self.previous_actions = [None] * self.num_envs
-        # self.dones[:] = False
-        
-        for i, env in enumerate(self.envs):
-            obs, _ = env.reset()
-            
-            mission = obs["mission"]
-            obs = obs.copy()
-            obs.pop('mission', None)
-            obs = self._add_carrying_flag(env, obs)
-            
-            self.obs_list.append(obs)
-            self.missions[i] = mission
-            self.lang_embs[i] = self._encode_mission(mission)
-            
-            # Recreate each bot for each fresh env
-            self.bots[i] = BabyAIBot(env)
 
-            # Initialise episode-level metrics
-            self.expert_steps[i] = self.compute_expert_steps_from_clone(env)
-            self.episode_steps[i] = 0
-            self.episode_success[i] = False
+        for i in range(self.num_envs):
+            self._reset_single_env(i)
 
         return list(self.obs_list)
 
@@ -243,26 +261,9 @@ class VectorBabyAIEnv:
                 self.total_episodes += 1
                 self.recent_successes.append(0)
 
-                # Reset env
-                obs, _ = env.reset()
-                mission = obs["mission"]
-                self.missions[i] = mission
-                self.lang_embs[i] = self._encode_mission(mission)
+                self._reset_single_env(i)
 
-                obs = obs.copy()
-                obs.pop('mission', None)
-                obs = self._add_carrying_flag(env, obs)
-
-                # Reset bot
-                self.bots[i] = BabyAIBot(env)
-
-                # Reset episode metrics
-                self.expert_steps[i] = self.compute_expert_steps_from_clone(env)
-                self.episode_steps[i] = 0
-                self.episode_success[i] = False
-                self.previous_actions[i] = None
-
-                next_obs_list.append(obs)
+                next_obs_list.append(self.obs_list[i])
                 terminated[i] = False
                 truncated[i] = True
                 continue
@@ -304,27 +305,9 @@ class VectorBabyAIEnv:
                     # recent success tracking
                     self.recent_successes.append(0)
 
-                # Reset the i-th environment and its corresponding bot, if it has terminated 
-                obs, _ = env.reset()
-                mission = obs["mission"]
-                self.missions[i] = mission
-                self.lang_embs[i] = self._encode_mission(mission)
-                
-                obs = obs.copy()
-                obs.pop('mission', None)
-                obs = self._add_carrying_flag(env, obs)
-
-                # Reset bot
-                self.bots[i] = BabyAIBot(env)
-
-                # Prepare episode-level metrics for the new episode
-                self.expert_steps[i] = self.compute_expert_steps_from_clone(env)
-                self.episode_steps[i] = 0
-                self.episode_success[i] = False
-
-                # Robustness: store the action that was executed.
-                # But if we reset, the next step is a new episode -> prev should be None.
-                self.previous_actions[i] = None
+                # Reset the i-th environment and its corresponding bot, if it has terminated
+                self._reset_single_env(i)
+                obs = self.obs_list[i]
             else:
                 self.previous_actions[i] = action
 
@@ -647,7 +630,7 @@ def main():
 
     # Create vectorized env
     max_steps = config.get('max_steps', None)
-    vec_env = VectorBabyAIEnv(task_id, num_envs, device, max_steps=max_steps)
+    vec_env = VectorBabyAIEnv(task_id, num_envs, device, max_steps=max_steps, lang_dim=lang_dim)
     obs_list = vec_env.reset()
     num_actions = vec_env.action_space.n
 
@@ -734,6 +717,7 @@ def main():
                 "success_rate/cumulative": success_rate,
                 "path_ratio/recent": recent_path_ratio,
                 "episodes/total": vec_env.total_episodes,
+                "episodes/bot_plan_failures": vec_env.bot_plan_failures,
             }
             if lpc_alpha > 0.0:
                 log_dict["lpc"] = avg_lpc
