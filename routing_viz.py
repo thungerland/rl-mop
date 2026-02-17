@@ -52,7 +52,7 @@ def _(Path, mo):
 
     # Number of episodes for evaluation (used when not using cache)
     num_episodes_slider = mo.ui.slider(
-        start=10, stop=500, value=50, step=10,
+        start=10, stop=10000, value=50, step=100,
         label="Number of Episodes (for fresh evaluation)"
     )
 
