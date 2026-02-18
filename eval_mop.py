@@ -53,7 +53,7 @@ class EvalVectorEnv:
     Similar to VectorBabyAIEnv but without expert bots and with position tracking.
     """
 
-    def __init__(self, task_id: str, num_envs: int, device: torch.device, lang_dim: int = 32):
+    def __init__(self, task_id: str, num_envs: int, device: torch.device, max_steps: int = None, lang_dim: int = 32):
         from transformers import AutoTokenizer, AutoModel
         import torch.nn as nn
 
@@ -77,6 +77,7 @@ class EvalVectorEnv:
             p.requires_grad = False
 
         self.lang_embs = torch.zeros(num_envs, lang_dim, device=device)
+        self.max_steps = max_steps
 
         # Metrics
         self.episode_steps = np.zeros(num_envs, dtype=int)
@@ -88,7 +89,10 @@ class EvalVectorEnv:
 
         # Create environments
         for i in range(num_envs):
-            env = gym.make(task_id)
+            if self.max_steps is not None:
+                env = gym.make(task_id, max_steps=self.max_steps)
+            else:
+                env = gym.make(task_id)
             env = env.unwrapped
             obs, _ = env.reset()
 
@@ -342,7 +346,7 @@ def load_checkpoint(checkpoint_path, device):
         intermediate_dim=config.get('intermediate_dim', 256),
         expert_hidden_sizes=config.get('expert_hidden_sizes', [32, 64, 128]),
         router_hidden_size=config.get('router_hidden_size', 64),
-        num_actions=7,  # BabyAI default
+        num_actions=config.get('num_actions', 7),  # fallback for old checkpoints
         lang_dim=config.get('lang_dim', 32)
     ).to(device)
 
@@ -472,6 +476,8 @@ def main():
                         help='Number of parallel environments')
     parser.add_argument('--num_episodes', type=int, default=100,
                         help='Number of episodes to evaluate')
+    parser.add_argument('--max_steps', type=int, default=None,
+                        help='Max steps per episode (default: use training config, or env default)')
 
     args = parser.parse_args()
 
@@ -486,8 +492,9 @@ def main():
     task_id = args.task_id or config['task_id']
     print(f"Evaluating on task: {task_id}")
 
-    # Create evaluation environment
-    vec_env = EvalVectorEnv(task_id, args.num_envs, device, lang_dim=config.get('lang_dim', 32))
+    # Create evaluation environment (CLI --max_steps overrides training config)
+    max_steps = args.max_steps if args.max_steps is not None else config.get('max_steps')
+    vec_env = EvalVectorEnv(task_id, args.num_envs, device, max_steps=max_steps, lang_dim=config.get('lang_dim', 32))
 
     # Load lang_proj weights if available
     if lang_proj_state_dict is not None:

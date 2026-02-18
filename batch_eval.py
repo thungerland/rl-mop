@@ -218,7 +218,9 @@ def main():
             task_id = config['task_id']
 
             # Create evaluation environment
-            vec_env = EvalVectorEnv(task_id, args.num_envs, device, lang_dim=config.get('lang_dim', 32))
+            vec_env = EvalVectorEnv(task_id, args.num_envs, device,
+                                    max_steps=config.get('max_steps'),
+                                    lang_dim=config.get('lang_dim', 32))
 
             # Load lang_proj weights if available
             if lang_proj_state_dict is not None:
