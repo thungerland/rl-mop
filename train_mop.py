@@ -633,6 +633,7 @@ def main():
     vec_env = VectorBabyAIEnv(task_id, num_envs, device, max_steps=max_steps, lang_dim=lang_dim)
     obs_list = vec_env.reset()
     num_actions = vec_env.action_space.n
+    config['num_actions'] = num_actions
 
     # Create MoE policy
     # Get MoE-specific config parameters or use defaults
