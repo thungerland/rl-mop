@@ -66,7 +66,7 @@ def load_existing_results(results_path: str) -> pd.DataFrame:
         'success_rate', 'path_ratio', 'mean_lpc', 'bot_plan_failures',
         'num_updates', 'unroll_len', 'lr', 'lpc_alpha',
         'expert_hidden_sizes', 'intermediate_dim', 'router_hidden_size',
-        'max_steps', 'evaluated_at'
+        'max_steps', 'lang_dim', 'evaluated_at'
     ])
 
 
@@ -98,6 +98,7 @@ def build_result_row(checkpoint_path: Path, metrics: dict, config: dict, num_epi
         'intermediate_dim': int(config.get('intermediate_dim')) if config.get('intermediate_dim') else None,
         'router_hidden_size': int(config.get('router_hidden_size')) if config.get('router_hidden_size') else None,
         'max_steps': int(config.get('max_steps')) if config.get('max_steps') else None,
+        'lang_dim': int(config.get('lang_dim', 32)),
         'evaluated_at': datetime.now().isoformat(),
     }
 
@@ -188,6 +189,8 @@ def main():
 
     # Load existing results
     results_df = load_existing_results(args.results_path)
+    if 'lang_dim' in results_df.columns:
+        results_df['lang_dim'] = results_df['lang_dim'].fillna(128).astype(int)
     print(f"Existing results: {len(results_df)} rows")
 
     # Filter to unevaluated checkpoints (unless --force)
