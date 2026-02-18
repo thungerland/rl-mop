@@ -135,7 +135,7 @@ def _(Path, checkpoint_dropdown, mo, np, num_envs_slider, num_episodes_slider, t
     - **Mean LPC**: {metrics['mean_lpc']:.2f}
     - **Routing Samples**: {len(routing_data)}
     """)
-    return routing_data, task_id
+    return routing_data, task_id, trial
 
 
 @app.cell
@@ -235,14 +235,16 @@ def _(mo):
 
 
 @app.cell
-def _(Path, fig_heatmap, mo, save_button, task_id):
+def _(Path, analysis_dropdown, fig_heatmap, mo, save_button, task_id, trial):
     # Handle save action
     _save_result = None
     if save_button.value:
-        _plot_dir = Path("plots") / task_id
+        _plot_dir = Path("plots") / task_id / f"trial_{trial}"
         _plot_dir.mkdir(parents=True, exist_ok=True)
-        fig_heatmap.savefig(_plot_dir / "routing_heatmap.png", dpi=150, bbox_inches='tight')
-        _save_result = f"Saved to {_plot_dir}/"
+        _suffix = "_by_starting_room" if analysis_dropdown.value == "by_starting_room" else ""
+        _filename = f"routing_heatmap{_suffix}.png"
+        fig_heatmap.savefig(_plot_dir / _filename, dpi=150, bbox_inches='tight')
+        _save_result = f"Saved to {_plot_dir / _filename}"
 
     mo.md(f"**{_save_result}**") if _save_result else None
     return
