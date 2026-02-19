@@ -96,14 +96,18 @@ def _(Path, checkpoint_dropdown, mo, np, num_envs_slider, num_episodes_slider, t
         with open(cache_path) as f:
             cached = json.load(f)
 
-        # Convert cached data back to expected format
-        # Handle both old format (3-tuple) and new format (4-tuple with env_context)
+        # Convert cached data back to expected format.
+        # Support three formats:
+        #   v1: per-timestep env_context embedded in each record
+        #   v2: deduplicated episodes list, each record has an 'episode' index
+        #   legacy: no env_context at all
+        episodes = cached.get('episodes')
         routing_data = [
             (
                 tuple(r['position']),
                 {k: np.array(v) for k, v in r['layer_routing'].items()},
                 r['lpc'],
-                r.get('env_context', {})  # Default to empty dict for old cache files
+                episodes[r['episode']] if episodes is not None else r.get('env_context', {}),
             )
             for r in cached['routing_data']
         ]
@@ -116,7 +120,7 @@ def _(Path, checkpoint_dropdown, mo, np, num_envs_slider, num_episodes_slider, t
         data_source = f"Loaded from cache ({cached['evaluated_at'][:10]})"
     else:
         # Run fresh evaluation
-        vec_env = EvalVectorEnv(task_id, num_envs_slider.value, device)
+        vec_env = EvalVectorEnv(task_id, num_envs_slider.value, device, lang_dim=config.get('lang_dim', 32))
         metrics, routing_data = evaluate(
             policy, vec_env, num_episodes_slider.value, device
         )

@@ -112,10 +112,20 @@ def save_routing_data(routing_data: list, checkpoint_path: Path, config: dict,
     cache_path = Path(cache_dir) / task_id / f"trial_{trial}"
     cache_path.mkdir(parents=True, exist_ok=True)
 
-    # Convert routing data to JSON-serializable format
+    # Deduplicate env_context: store once per unique episode layout, reference by index
+    # per timestep. env_context is identical across all timesteps of an episode, so
+    # storing it per-timestep inflates file size massively for long episodes / large mazes.
+    episodes_json = []
+    context_to_idx = {}
     routing_json = []
+
     for pos, layer_routing, lpc, env_context in routing_data:
-        # Handle both numpy arrays and regular lists
+        context_key = str(env_context)
+        if context_key not in context_to_idx:
+            context_to_idx[context_key] = len(episodes_json)
+            episodes_json.append(env_context)
+        episode_idx = context_to_idx[context_key]
+
         layer_routing_json = {}
         for k, v in layer_routing.items():
             if hasattr(v, 'tolist'):
@@ -124,10 +134,10 @@ def save_routing_data(routing_data: list, checkpoint_path: Path, config: dict,
                 layer_routing_json[k] = list(v)
 
         routing_json.append({
+            'episode': episode_idx,
             'position': [int(p) for p in pos],
             'layer_routing': layer_routing_json,
             'lpc': float(lpc),
-            'env_context': env_context
         })
 
     cache_data = {
@@ -140,7 +150,8 @@ def save_routing_data(routing_data: list, checkpoint_path: Path, config: dict,
             'mean_lpc': float(metrics['mean_lpc']),
             'bot_plan_failures': int(metrics.get('bot_plan_failures', 0)),
         },
-        'routing_data': routing_json
+        'episodes': episodes_json,
+        'routing_data': routing_json,
     }
 
     with open(cache_path / 'routing_data.json', 'w') as f:
