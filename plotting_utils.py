@@ -79,7 +79,7 @@ def aggregate_routing_by_position(
     position_lpc = defaultdict(list)
 
     for sample in routing_data:
-        pos, layer_routing, lpc, env_context = sample
+        pos, layer_routing, lpc, env_context, *_ = sample
 
         # Apply filter if provided
         if filter_fn is not None and not filter_fn(pos, layer_routing, lpc, env_context):
@@ -343,7 +343,7 @@ def get_available_analyses(routing_data: list) -> list[str]:
         return available
 
     # Check first sample's env_context for available fields
-    _, _, _, env_context = routing_data[0]
+    env_context = routing_data[0][3]
 
     if not env_context:
         return available
@@ -351,6 +351,42 @@ def get_available_analyses(routing_data: list) -> list[str]:
     # Check for room-based grouping
     if env_context.get('agent_start_room') is not None:
         available.append('by_starting_room')
+
+    # Door-location grouping: only offer if distinct door-position-sets <= 9.
+    # Sample up to 200 timesteps — env_context repeats within episodes so a
+    # small probe is sufficient to discover the distinct door configurations.
+    if env_context.get('doors') is not None:
+        distinct_door_sets = set()
+        for sample in routing_data[:200]:
+            ctx = sample[3]
+            doors = ctx.get('doors')
+            if doors:
+                door_pos_key = tuple(sorted((d[0], d[1]) for d in doors))
+                distinct_door_sets.add(door_pos_key)
+        if 1 <= len(distinct_door_sets) <= 9:
+            available.append('by_door_location')
+
+    # Combined door+box-row grouping: only offer if both doors and boxes exist
+    # and distinct combined keys <= 16.
+    if env_context.get('doors') is not None and env_context.get('boxes') is not None:
+        distinct_combined = set()
+        for sample in routing_data[:200]:
+            ctx = sample[3]
+            doors = ctx.get('doors')
+            boxes = ctx.get('boxes')
+            if doors and boxes:
+                door_key = tuple(sorted((d[0], d[1]) for d in doors))
+                box_row_key = tuple(sorted(b[1] for b in boxes))
+                distinct_combined.add((door_key, box_row_key))
+        if 1 <= len(distinct_combined) <= 16:
+            available.append('by_door_and_box_row')
+
+    # Carrying-phase split: only offer if both carrying=0 and carrying=1 timesteps exist.
+    # Guard against old 4-tuple caches where the 5th element is absent.
+    if len(routing_data) > 0 and len(routing_data[0]) > 4:
+        carrying_values = set(sample[4] for sample in routing_data)
+        if carrying_values == {0, 1}:
+            available.append('by_carrying_phase')
 
     return available
 
@@ -369,14 +405,35 @@ def group_routing_data(routing_data: list, group_by: str) -> dict[tuple, list]:
     """
     groups = defaultdict(list)
     for sample in routing_data:
-        pos, layer_routing, lpc, env_context = sample
-        key = env_context.get(group_by)
-        if key is not None:
+        pos, layer_routing, lpc, env_context, *_ = sample
+
+        if group_by == 'carrying_phase':
+            carrying = sample[4] if len(sample) > 4 else 0
+            key = (carrying,)
+        elif group_by == 'door_location':
+            doors = env_context.get('doors')
+            if not doors:
+                continue
+            # sorted tuple of (x, y) pairs — order-independent, ignores color/state
+            key = tuple(sorted((d[0], d[1]) for d in doors))
+        elif group_by == 'door_and_box_row':
+            doors = env_context.get('doors')
+            boxes = env_context.get('boxes')
+            if not doors or not boxes:
+                continue
+            door_key = tuple(sorted((d[0], d[1]) for d in doors))
+            box_row_key = tuple(sorted(b[1] for b in boxes))
+            key = (door_key, box_row_key)
+        else:
+            key = env_context.get(group_by)
+            if key is None:
+                continue
             if isinstance(key, list):
                 key = tuple(key)
             elif not isinstance(key, tuple):
                 key = (key,)
-            groups[key].append(sample)
+
+        groups[key].append(sample)
     return dict(groups)
 
 
@@ -435,6 +492,66 @@ def room_labels_for_groups(sorted_keys: list, room_grid_shape: tuple = None) -> 
     return labels
 
 
+def door_location_labels_for_groups(sorted_keys: list) -> dict:
+    """Map door-location group keys to human-readable labels.
+
+    Args:
+        sorted_keys: List of group keys, each a tuple of (x, y) tuples,
+                     e.g. ((5, 3),) for a single door.
+
+    Returns:
+        Dict mapping group_key -> label string
+    """
+    labels = {}
+    for key in sorted_keys:
+        if len(key) == 1:
+            labels[key] = f"Door at {key[0][0]},{key[0][1]}"
+        else:
+            coords = ",".join(f"({x},{y})" for x, y in key)
+            labels[key] = f"Doors at {coords}"
+    return labels
+
+
+def door_and_box_row_labels_for_groups(sorted_keys: list) -> dict:
+    """Map door+box-row group keys to human-readable labels.
+
+    Args:
+        sorted_keys: List of group keys, each a tuple of
+                     (door_pos_tuple, box_row_tuple), e.g.
+                     (((5, 3),), (2,)) meaning door at (5,3), box on row 2.
+
+    Returns:
+        Dict mapping group_key -> label string
+    """
+    labels = {}
+    for key in sorted_keys:
+        door_part, box_row_part = key
+        if len(door_part) == 1:
+            door_str = f"Door {door_part[0][0]},{door_part[0][1]}"
+        else:
+            door_str = "Doors " + ",".join(f"({x},{y})" for x, y in door_part)
+        if len(box_row_part) == 1:
+            box_str = f"Box row {box_row_part[0]}"
+        else:
+            box_str = "Box rows " + ",".join(str(r) for r in box_row_part)
+        labels[key] = f"{door_str} / {box_str}"
+    return labels
+
+
+def carrying_phase_labels_for_groups(sorted_keys: list) -> dict:
+    """Map carrying-phase group keys to human-readable labels.
+
+    Args:
+        sorted_keys: List of group keys, each a 1-tuple (carrying,)
+                     where carrying is 0 (not carrying) or 1 (carrying object).
+
+    Returns:
+        Dict mapping group_key -> label string
+    """
+    labels = {(0,): "Not carrying", (1,): "Carrying object"}
+    return {k: labels.get(k, f"Phase {k[0]}") for k in sorted_keys}
+
+
 def plot_grouped_routing(
     routing_data: list,
     group_by: str,
@@ -474,7 +591,7 @@ def plot_grouped_routing(
     num_groups = len(sorted_keys)
 
     # Get room_grid_shape from first sample (for room labels)
-    _, _, _, first_ctx = routing_data[0]
+    first_ctx = routing_data[0][3]
     room_grid_shape = first_ctx.get('room_grid_shape')
 
     # Aggregate each group to determine layer names and num_experts
@@ -522,6 +639,12 @@ def plot_grouped_routing(
     # Compute human-readable labels for all groups
     if group_by == 'agent_start_room':
         group_labels = room_labels_for_groups(sorted_keys, room_grid_shape)
+    elif group_by == 'door_location':
+        group_labels = door_location_labels_for_groups(sorted_keys)
+    elif group_by == 'door_and_box_row':
+        group_labels = door_and_box_row_labels_for_groups(sorted_keys)
+    elif group_by == 'carrying_phase':
+        group_labels = carrying_phase_labels_for_groups(sorted_keys)
     else:
         group_labels = {k: f"{group_by}={k}" for k in sorted_keys}
 

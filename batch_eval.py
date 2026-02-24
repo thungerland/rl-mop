@@ -119,7 +119,8 @@ def save_routing_data(routing_data: list, checkpoint_path: Path, config: dict,
     context_to_idx = {}
     routing_json = []
 
-    for pos, layer_routing, lpc, env_context in routing_data:
+    for pos, layer_routing, lpc, env_context, *_carrying in routing_data:
+        carrying = int(_carrying[0]) if _carrying else 0
         context_key = str(env_context)
         if context_key not in context_to_idx:
             context_to_idx[context_key] = len(episodes_json)
@@ -138,6 +139,7 @@ def save_routing_data(routing_data: list, checkpoint_path: Path, config: dict,
             'position': [int(p) for p in pos],
             'layer_routing': layer_routing_json,
             'lpc': float(lpc),
+            'carrying': carrying,
         })
 
     cache_data = {

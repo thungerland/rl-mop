@@ -422,8 +422,9 @@ def evaluate(policy, vec_env, num_episodes, device):
                     )
                     sample_lpc += (weights * sizes_squared).sum().item()
 
-                # Include environment context (object positions from episode start)
-                routing_data.append((pos, layer_routing, sample_lpc, env_contexts[i]))
+                # Include environment context and carrying state
+                carrying = int(vec_env.obs_list[i].get('carrying_flag', 0))
+                routing_data.append((pos, layer_routing, sample_lpc, env_contexts[i], carrying))
 
             # Sample actions (greedy for eval)
             actions = logits.argmax(dim=-1).cpu().numpy()

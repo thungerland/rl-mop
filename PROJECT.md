@@ -78,7 +78,8 @@ plots/<task_id>/trial_<N>/routing_heatmap[_by_starting_room].png
           "layer_2": [...]
       },
       "lpc": float,              # Layered Parameter Cost for this step
-      "env_context": {           # Captured at episode start
+      "carrying": 0 or 1,        # Whether agent is carrying an object at this step
+      "env_context": {           # Captured at episode start (referenced via 'episode' index)
           "grid_size", "agent_start_pos", "agent_start_room",
           "room_grid_shape", "goals", "doors", "keys", "balls", "boxes"
       }
@@ -113,10 +114,15 @@ plots/<task_id>/trial_<N>/routing_heatmap[_by_starting_room].png
 | `render_routing_heatmap(ax, avg_routing_by_pos, grid_info, layer_name)` | Renders one MoE layer's heatmap: dominant expert → hue, confidence → intensity |
 | `render_lpc_heatmap(ax, avg_lpc_by_pos, grid_info)` | Renders LPC as viridis heatmap |
 | `plot_overall_routing(routing_data, env_image, env_mission, filter_fn, title_suffix)` | Full multi-panel figure: env image + one heatmap per layer + LPC |
-| `get_available_analyses(routing_data)` | Returns available grouping modes e.g. `['overall', 'by_starting_room']` |
-| `group_routing_data(routing_data, group_by)` | Groups timesteps by an `env_context` field |
+| `get_available_analyses(routing_data)` | Returns available grouping modes e.g. `['overall', 'by_starting_room', 'by_door_location', 'by_carrying_phase']` |
+| `group_routing_data(routing_data, group_by)` | Groups timesteps by `env_context` field or virtual key (`'door_location'`, `'door_and_box_row'`, `'carrying_phase'`) |
 | `room_labels_for_groups(sorted_keys, room_grid_shape)` | Maps room coords to labels like `'Top-Left'` |
-| `plot_grouped_routing(routing_data, group_by, ...)` | Multi-row figure, one row per group (e.g. per starting room) |
+| `door_location_labels_for_groups(sorted_keys)` | Maps door-position keys to labels like `'Door at 5,3'` |
+| `door_and_box_row_labels_for_groups(sorted_keys)` | Maps combined door+box-row keys to labels like `'Door 5,3 / Box row 2'` |
+| `carrying_phase_labels_for_groups(sorted_keys)` | Maps carrying keys to `'Not carrying'` / `'Carrying object'` |
+| `plot_grouped_routing(routing_data, group_by, ...)` | Multi-row figure, one row per group (e.g. per starting room, door location, carrying phase) |
+
+**Routing data tuple:** `(position, layer_routing, lpc, env_context, carrying)` — 5-tuple; `carrying` is 0/1 per timestep (requires new cache).
 
 **Constants:** `EXPERT_CMAPS` (6 custom colormaps, one per expert), `UNVISITED_COLOR`
 
@@ -128,10 +134,10 @@ plots/<task_id>/trial_<N>/routing_heatmap[_by_starting_room].png
 |---|---|---|
 | 1 | — | Imports |
 | 2 | `checkpoint_dropdown`, `use_cache_toggle`, `num_episodes_slider`, `num_envs_slider` | UI controls; scans `modal_checkpoints/` + `checkpoints/` |
-| 3 | `routing_data` | Load from cache or run `evaluate()` fresh; displays metrics |
-| 4 | `analysis_dropdown` | Selects analysis mode (overall / by_starting_room) |
-| 5 | `room_env_images` | Renders one env screenshot per starting room |
-| 6 | `fig_heatmap` | Calls `plot_overall_routing` or `plot_grouped_routing` |
+| 3 | `routing_data` | Load from cache or run `evaluate()` fresh; displays metrics. Tuple: `(pos, layer_routing, lpc, env_context, carrying)` |
+| 4 | `analysis_dropdown` | Selects analysis mode: overall / by_starting_room / by_door_location / by_door_and_box_row / by_carrying_phase |
+| 5 | `room_env_images`, `door_env_images`, `door_and_box_env_images` | Renders one env screenshot per group (room / door location / door+box combo) |
+| 6 | `fig_heatmap` | Calls `plot_overall_routing` or `plot_grouped_routing` based on dropdown |
 | 7 | — | `mo.mpl.interactive(fig_heatmap)` |
 | 8 | — | Save button → `plots/<task_id>/trial_<N>/routing_heatmap*.png` |
 
