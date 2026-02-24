@@ -9,7 +9,6 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import matplotlib.gridspec as gridspec
 from collections import defaultdict
-from typing import Callable
 
 
 def _make_expert_cmap(light_color, dark_color, name):
@@ -58,17 +57,12 @@ def compute_grid_bounds(positions: list[tuple]) -> dict:
     }
 
 
-def aggregate_routing_by_position(
-    routing_data: list,
-    filter_fn: Callable = None
-) -> tuple[dict, dict, list]:
+def aggregate_routing_by_position(routing_data: list) -> tuple[dict, dict, list]:
     """
     Aggregate routing weights and LPC by position.
 
     Args:
-        routing_data: List of (position, layer_routing, lpc, env_context) tuples
-        filter_fn: Optional function (pos, layer_routing, lpc, env_context) -> bool
-                   to filter samples before aggregation
+        routing_data: List of dicts with keys position, layer_routing, lpc, env_context
 
     Returns:
         avg_routing_by_pos: dict mapping position -> {layer_name: avg_weights}
@@ -79,11 +73,9 @@ def aggregate_routing_by_position(
     position_lpc = defaultdict(list)
 
     for sample in routing_data:
-        pos, layer_routing, lpc, env_context, *_ = sample
-
-        # Apply filter if provided
-        if filter_fn is not None and not filter_fn(pos, layer_routing, lpc, env_context):
-            continue
+        pos = sample['position']
+        layer_routing = sample['layer_routing']
+        lpc = sample['lpc']
 
         position_routing[pos].append(layer_routing)
         position_lpc[pos].append(lpc)
@@ -221,8 +213,6 @@ def plot_overall_routing(
     routing_data: list,
     env_image: np.ndarray = None,
     env_mission: str = "",
-    filter_fn: Callable = None,
-    title_suffix: str = ""
 ) -> plt.Figure:
     """
     Create a complete routing visualization figure.
@@ -231,18 +221,16 @@ def plot_overall_routing(
     and an LPC heatmap. Unvisited cells are rendered as dark gray.
 
     Args:
-        routing_data: List of (position, layer_routing, lpc, env_context) tuples
+        routing_data: List of dicts with keys position, layer_routing, lpc, env_context
         env_image: Optional environment render to show
         env_mission: Optional language instruction to show under the environment image
-        filter_fn: Optional function to filter samples before aggregation
-        title_suffix: Optional suffix to add to figure title
 
     Returns:
         matplotlib Figure object
     """
     # Aggregate data
     avg_routing_by_pos, avg_lpc_by_pos, layer_names = aggregate_routing_by_position(
-        routing_data, filter_fn
+        routing_data
     )
 
     if not avg_routing_by_pos:
@@ -343,7 +331,7 @@ def get_available_analyses(routing_data: list) -> list[str]:
         return available
 
     # Check first sample's env_context for available fields
-    env_context = routing_data[0][3]
+    env_context = routing_data[0]['env_context']
 
     if not env_context:
         return available
@@ -358,7 +346,7 @@ def get_available_analyses(routing_data: list) -> list[str]:
     if env_context.get('doors') is not None:
         distinct_door_sets = set()
         for sample in routing_data[:200]:
-            ctx = sample[3]
+            ctx = sample['env_context']
             doors = ctx.get('doors')
             if doors:
                 door_pos_key = tuple(sorted((d[0], d[1]) for d in doors))
@@ -371,7 +359,7 @@ def get_available_analyses(routing_data: list) -> list[str]:
     if env_context.get('doors') is not None and env_context.get('boxes') is not None:
         distinct_combined = set()
         for sample in routing_data[:200]:
-            ctx = sample[3]
+            ctx = sample['env_context']
             doors = ctx.get('doors')
             boxes = ctx.get('boxes')
             if doors and boxes:
@@ -382,9 +370,8 @@ def get_available_analyses(routing_data: list) -> list[str]:
             available.append('by_door_and_box_row')
 
     # Carrying-phase split: only offer if both carrying=0 and carrying=1 timesteps exist.
-    # Guard against old 4-tuple caches where the 5th element is absent.
-    if len(routing_data) > 0 and len(routing_data[0]) > 4:
-        carrying_values = set(sample[4] for sample in routing_data)
+    if len(routing_data) > 0 and 'carrying' in routing_data[0]:
+        carrying_values = set(sample['carrying'] for sample in routing_data)
         if carrying_values == {0, 1}:
             available.append('by_carrying_phase')
 
@@ -405,11 +392,10 @@ def group_routing_data(routing_data: list, group_by: str) -> dict[tuple, list]:
     """
     groups = defaultdict(list)
     for sample in routing_data:
-        pos, layer_routing, lpc, env_context, *_ = sample
+        env_context = sample['env_context']
 
         if group_by == 'carrying_phase':
-            carrying = sample[4] if len(sample) > 4 else 0
-            key = (carrying,)
+            key = (sample.get('carrying', 0),)
         elif group_by == 'door_location':
             doors = env_context.get('doors')
             if not doors:
@@ -591,7 +577,7 @@ def plot_grouped_routing(
     num_groups = len(sorted_keys)
 
     # Get room_grid_shape from first sample (for room labels)
-    first_ctx = routing_data[0][3]
+    first_ctx = routing_data[0]['env_context']
     room_grid_shape = first_ctx.get('room_grid_shape')
 
     # Aggregate each group to determine layer names and num_experts
@@ -631,7 +617,7 @@ def plot_grouped_routing(
     )
 
     # Compute grid bounds from ALL data (so all rows share the same coordinate system)
-    all_positions = [sample[0] for sample in routing_data]
+    all_positions = [sample['position'] for sample in routing_data]
     global_grid_info = compute_grid_bounds(all_positions)
 
     lpc_im = None  # Track for colorbar

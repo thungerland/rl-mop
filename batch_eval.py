@@ -119,8 +119,14 @@ def save_routing_data(routing_data: list, checkpoint_path: Path, config: dict,
     context_to_idx = {}
     routing_json = []
 
-    for pos, layer_routing, lpc, env_context, *_carrying in routing_data:
-        carrying = int(_carrying[0]) if _carrying else 0
+    for sample in routing_data:
+        pos = sample['position']
+        layer_routing = sample['layer_routing']
+        lpc = sample['lpc']
+        env_context = sample['env_context']
+        carrying = sample.get('carrying', 0)
+        action_logits = sample.get('action_logits')
+
         context_key = str(env_context)
         if context_key not in context_to_idx:
             context_to_idx[context_key] = len(episodes_json)
@@ -134,13 +140,16 @@ def save_routing_data(routing_data: list, checkpoint_path: Path, config: dict,
             else:
                 layer_routing_json[k] = list(v)
 
-        routing_json.append({
+        entry = {
             'episode': episode_idx,
             'position': [int(p) for p in pos],
             'layer_routing': layer_routing_json,
             'lpc': float(lpc),
-            'carrying': carrying,
-        })
+            'carrying': int(carrying),
+        }
+        if action_logits is not None:
+            entry['action_logits'] = [float(v) for v in action_logits]
+        routing_json.append(entry)
 
     cache_data = {
         'checkpoint_path': str(checkpoint_path),

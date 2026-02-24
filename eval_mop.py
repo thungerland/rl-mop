@@ -365,7 +365,8 @@ def evaluate(policy, vec_env, num_episodes, device):
 
     Returns:
         metrics: dict with success_rate, path_ratio, mean_lpc
-        routing_data: list of (position, layer_routing, lpc, env_context) tuples
+        routing_data: list of dicts with keys:
+            position, layer_routing, lpc, env_context, carrying, action_logits
             where env_context contains grid_size, goals, doors, keys, balls, boxes
     """
     policy.eval()
@@ -422,9 +423,16 @@ def evaluate(policy, vec_env, num_episodes, device):
                     )
                     sample_lpc += (weights * sizes_squared).sum().item()
 
-                # Include environment context and carrying state
+                # Include environment context, carrying state, and action logits
                 carrying = int(vec_env.obs_list[i].get('carrying_flag', 0))
-                routing_data.append((pos, layer_routing, sample_lpc, env_contexts[i], carrying))
+                routing_data.append({
+                    'position': pos,
+                    'layer_routing': layer_routing,
+                    'lpc': sample_lpc,
+                    'env_context': env_contexts[i],
+                    'carrying': carrying,
+                    'action_logits': logits[i].cpu().numpy(),
+                })
 
             # Sample actions (greedy for eval)
             actions = logits.argmax(dim=-1).cpu().numpy()
@@ -453,7 +461,7 @@ def evaluate(policy, vec_env, num_episodes, device):
     # Compute metrics
     success_rate = vec_env.successful_episodes / vec_env.total_episodes if vec_env.total_episodes > 0 else 0.0
     path_ratio = vec_env.sum_path_ratio / vec_env.num_successful_with_ratio if vec_env.num_successful_with_ratio > 0 else float('nan')
-    mean_lpc = sum(rd[2] for rd in routing_data) / len(routing_data) if routing_data else 0.0  # rd[2] is lpc
+    mean_lpc = sum(rd['lpc'] for rd in routing_data) / len(routing_data) if routing_data else 0.0
 
     metrics = {
         'success_rate': success_rate,

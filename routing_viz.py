@@ -101,15 +101,17 @@ def _(Path, checkpoint_dropdown, mo, np, num_envs_slider, num_episodes_slider, t
         #   v1: per-timestep env_context embedded in each record
         #   v2: deduplicated episodes list, each record has an 'episode' index
         #   legacy: no env_context at all
+        #   v3: includes 'action_logits' list of 7 floats per timestep
         episodes = cached.get('episodes')
         routing_data = [
-            (
-                tuple(r['position']),
-                {k: np.array(v) for k, v in r['layer_routing'].items()},
-                r['lpc'],
-                episodes[r['episode']] if episodes is not None else r.get('env_context', {}),
-                r.get('carrying', 0),
-            )
+            {
+                'position': tuple(r['position']),
+                'layer_routing': {k: np.array(v) for k, v in r['layer_routing'].items()},
+                'lpc': r['lpc'],
+                'env_context': episodes[r['episode']] if episodes is not None else r.get('env_context', {}),
+                'carrying': r.get('carrying', 0),
+                'action_logits': np.array(r['action_logits'], dtype=np.float32) if 'action_logits' in r else None,
+            }
             for r in cached['routing_data']
         ]
         metrics = {
