@@ -17,7 +17,7 @@ image = (
 @app.function(
     image=image,
     gpu="T4",
-    timeout=60 * 60 * 8,
+    timeout=60 * 60 * 24, # 24 hours which is the max allowed by Modal for GPU functions - use checkpoints and reentry to handle longer experiments
     secrets=[modal.Secret.from_name("wandb-secret")],
     volumes={CHECKPOINTS_PATH: checkpoints_volume},
 )
