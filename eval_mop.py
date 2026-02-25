@@ -337,7 +337,7 @@ def load_checkpoint(checkpoint_path, device):
         config: dict with training config
         lang_proj_state_dict: state dict for lang_proj layer (or None if not saved)
     """
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     config = checkpoint['config']
 
     # Reconstruct policy from config

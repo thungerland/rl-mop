@@ -6,6 +6,10 @@ app = modal.App("babyai-gru-train")
 checkpoints_volume = modal.Volume.from_name("rl-mop", create_if_missing=True)
 CHECKPOINTS_PATH = "/checkpoints"
 
+# Persistent volume for storing evaluation outputs (cache + CSV)
+eval_volume = modal.Volume.from_name("rl-mop-eval", create_if_missing=True)
+EVAL_OUTPUT_PATH = "/eval_output"
+
 image = (
     modal.Image.debian_slim(python_version="3.10")
     .apt_install("git")
@@ -66,6 +70,116 @@ def train_run(
     checkpoints_volume.commit()
 
     return result.returncode
+
+
+@app.function(
+    image=image,
+    gpu="T4",
+    timeout=60 * 60 * 24,
+    secrets=[modal.Secret.from_name("wandb-secret")],
+    volumes={
+        CHECKPOINTS_PATH: checkpoints_volume,
+        EVAL_OUTPUT_PATH: eval_volume,
+    },
+)
+def eval_run(
+    num_episodes: int = 1000,
+    force: bool = False,
+    task: str = None,
+    trial: int = None,
+    skip_routing: bool = False,
+):
+    """
+    Run batch_eval.py on Modal, reading checkpoints from the rl-mop volume
+    and writing evaluation_cache/ and evaluation_results.csv to the rl-mop-eval volume.
+    """
+    import sys
+    import subprocess
+    sys.path.append("/root/project")
+
+    cmd = [
+        sys.executable,
+        "/root/project/batch_eval.py",
+        "--checkpoint_dir", CHECKPOINTS_PATH,
+        "--cache_dir", f"{EVAL_OUTPUT_PATH}/evaluation_cache",
+        "--results_path", f"{EVAL_OUTPUT_PATH}/evaluation_results.csv",
+        "--num_episodes", str(num_episodes),
+    ]
+
+    if force:
+        cmd.append("--force")
+    if task:
+        cmd.extend(["--task", task])
+    if trial is not None:
+        cmd.extend(["--trial", str(trial)])
+    if skip_routing:
+        cmd.append("--skip_routing")
+
+    result = subprocess.run(cmd, capture_output=False, text=True)
+
+    # Commit results to the eval volume so they are retrievable
+    eval_volume.commit()
+
+    return result.returncode
+
+
+@app.local_entrypoint()
+def eval_main(
+    num_episodes: int = 1000,
+    force: bool = False,
+    task: str = None,
+    trial: int = None,
+    skip_routing: bool = False,
+):
+    """
+    Launch batch evaluation on Modal and print download instructions on completion.
+
+    Usage examples:
+        # Evaluate all checkpoints (1000 episodes each)
+        modal run modal_app.py::eval_main
+
+        # Force re-evaluation
+        modal run modal_app.py::eval_main --force
+
+        # Custom episode count
+        modal run modal_app.py::eval_main --num-episodes 500
+
+        # Evaluate a single task
+        modal run modal_app.py::eval_main --task "BabyAI-UnlockPickup-v0"
+
+        # Then download results locally
+        modal volume get rl-mop-eval /eval_output/evaluation_cache ./evaluation_cache
+        modal volume get rl-mop-eval /eval_output/evaluation_results.csv ./evaluation_results.csv
+    """
+    print(f"Launching batch evaluation on Modal:")
+    print(f"  Episodes per checkpoint: {num_episodes}")
+    print(f"  Force re-evaluate: {force}")
+    if task:
+        print(f"  Task filter: {task}")
+    if trial is not None:
+        print(f"  Trial filter: {trial}")
+    if skip_routing:
+        print(f"  Skipping routing cache")
+
+    job = eval_run.spawn(
+        num_episodes=num_episodes,
+        force=force,
+        task=task,
+        trial=trial,
+        skip_routing=skip_routing,
+    )
+
+    print("\nJob queued. Waiting for completion...")
+    try:
+        return_code = job.get()
+        if return_code == 0:
+            print("\n✓ Evaluation complete. Download results with:")
+            print("  modal volume get rl-mop-eval /eval_output/evaluation_cache ./evaluation_cache")
+            print("  modal volume get rl-mop-eval /eval_output/evaluation_results.csv ./evaluation_results.csv")
+        else:
+            print(f"\n✗ Evaluation failed (exit code {return_code}).")
+    except Exception as e:
+        print(f"\n✗ Job error: {e}")
 
 
 @app.local_entrypoint()

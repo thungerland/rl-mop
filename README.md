@@ -28,7 +28,7 @@ For Modal training, download checkpoints from the volume:
 # List available checkpoints
 modal volume ls rl-mop
 
-# Download to local folder
+# Download to local folder; --force to override existing file with the same name
 modal volume get rl-mop / ./modal_checkpoints/
 
 # Copy to checkpoints folder
@@ -37,7 +37,28 @@ cp -r modal_checkpoints/* checkpoints/
 
 ### 3. Evaluate
 
-**Batch evaluation (recommended):**
+**Batch evaluation on Modal (recommended):**
+```bash
+# Evaluate all checkpoints on Modal (1000 episodes each, default)
+modal run modal_app.py::eval_main
+
+# Force re-evaluation
+modal run modal_app.py::eval_main --force
+
+# Custom episode count
+modal run modal_app.py::eval_main --num-episodes 500
+
+# Evaluate a single task
+modal run modal_app.py::eval_main --task "BabyAI-UnlockPickup-v0"
+
+# After completion, download results locally
+modal volume get rl-mop-eval /evaluation_cache ./evaluation_cache
+modal volume get rl-mop-eval /evaluation_results.csv ./evaluation_results.csv
+```
+
+Results are written to the `rl-mop-eval` Modal volume and downloaded on demand. The `evaluation_cache/` folder is what `routing_viz.py` and `logit_viz.py` read from.
+
+**Local batch evaluation (alternative):**
 ```bash
 # Evaluate all new checkpoints in modal_checkpoints/
 python batch_eval.py
@@ -45,7 +66,7 @@ python batch_eval.py
 # Re-evaluate all checkpoints
 python batch_eval.py --force
 
-# Evaluate with more episodes for accuracy
+# Evaluate with custom episode count
 python batch_eval.py --num_episodes 200
 
 # Evaluate specific task or trial
@@ -87,7 +108,14 @@ marimo run routing_viz.py
 ```
 This opens an interactive notebook showing:
 - Environment layout
-- Expert routing heatmaps by grid position
-- Routing weight distributions
+- Expert routing heatmaps by grid position (overall, by starting room, door location, carrying phase, etc.)
 
 The notebook loads cached routing data by default (from `batch_eval.py`). Uncheck "Use cached routing data" to run fresh evaluation.
+
+**Logit / distributional analysis (marimo notebook):**
+```bash
+marimo run logit_viz.py
+```
+Complements `routing_viz.py` with non-spatial, distributional analyses. Requires a v3 cache file (produced by `batch_eval.py` without `--skip_routing`). Plot types:
+- **Action frequency** — bar chart of how often each action is chosen, optionally split by carrying phase
+- **Action entropy heatmap** — spatial heatmap of mean policy entropy per grid cell (high = uncertain)
