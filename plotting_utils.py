@@ -57,6 +57,33 @@ def compute_grid_bounds(positions: list[tuple]) -> dict:
     }
 
 
+def pos_to_quadrant(x: int, y: int, room_bounds: tuple) -> str:
+    """Map a grid position to a room quadrant label.
+
+    Args:
+        x: Grid x coordinate
+        y: Grid y coordinate
+        room_bounds: (x_min, y_min, x_max, y_max) inclusive interior floor bounds
+
+    Returns:
+        One of 'TL', 'TR', 'BL', 'BR'.
+        MiniGrid convention: y increases downward, so lower y = Top.
+    """
+    x_min, y_min, x_max, y_max = room_bounds
+    mid_x = (x_min + x_max) / 2
+    mid_y = (y_min + y_max) / 2
+    top = y < mid_y
+    left = x < mid_x
+    if top and left:
+        return "TL"
+    elif top:
+        return "TR"
+    elif left:
+        return "BL"
+    else:
+        return "BR"
+
+
 def aggregate_routing_by_position(routing_data: list) -> tuple[dict, dict, list]:
     """
     Aggregate routing weights and LPC by position.
@@ -375,6 +402,28 @@ def get_available_analyses(routing_data: list) -> list[str]:
         if carrying_values == {0, 1}:
             available.append('by_carrying_phase')
 
+    # Agent+target quadrant grouping: requires agent_start_pos, target_pos, room_bounds.
+    # Only offered when there is meaningful variation in agent start quadrant (>= 2 distinct)
+    # and the total number of combinations is within reason (<= 16, i.e. 4x4).
+    if (env_context.get('agent_start_pos') is not None
+            and env_context.get('target_pos') is not None
+            and env_context.get('room_bounds') is not None):
+        distinct_quad_combos = set()
+        distinct_agent_quads = set()
+        for sample in routing_data[:200]:
+            ctx = sample['env_context']
+            agent_pos = ctx.get('agent_start_pos')
+            target_pos = ctx.get('target_pos')
+            room_bounds = ctx.get('room_bounds')
+            if agent_pos is None or target_pos is None or room_bounds is None:
+                continue
+            aq = pos_to_quadrant(agent_pos[0], agent_pos[1], room_bounds)
+            tq = pos_to_quadrant(target_pos[0], target_pos[1], room_bounds)
+            distinct_quad_combos.add((aq, tq))
+            distinct_agent_quads.add(aq)
+        if len(distinct_agent_quads) >= 2 and len(distinct_quad_combos) <= 16:
+            available.append('by_agent_and_target_quadrant')
+
     return available
 
 
@@ -410,6 +459,15 @@ def group_routing_data(routing_data: list, group_by: str) -> dict[tuple, list]:
             door_key = tuple(sorted((d[0], d[1]) for d in doors))
             box_row_key = tuple(sorted(b[1] for b in boxes))
             key = (door_key, box_row_key)
+        elif group_by == 'agent_and_target_quadrant':
+            agent_pos = env_context.get('agent_start_pos')
+            target_pos = env_context.get('target_pos')
+            room_bounds = env_context.get('room_bounds')
+            if agent_pos is None or target_pos is None or room_bounds is None:
+                continue
+            aq = pos_to_quadrant(agent_pos[0], agent_pos[1], room_bounds)
+            tq = pos_to_quadrant(target_pos[0], target_pos[1], room_bounds)
+            key = (aq, tq)
         else:
             key = env_context.get(group_by)
             if key is None:
@@ -524,6 +582,19 @@ def door_and_box_row_labels_for_groups(sorted_keys: list) -> dict:
     return labels
 
 
+def agent_and_target_quadrant_labels_for_groups(sorted_keys: list) -> dict:
+    """Map (agent_quadrant, target_quadrant) group keys to human-readable labels.
+
+    Args:
+        sorted_keys: List of group keys, each a 2-tuple of quadrant strings
+                     e.g. ('TL', 'BR')
+
+    Returns:
+        Dict mapping group_key -> label string like 'Agent: TL / Target: BR'
+    """
+    return {key: f"Agent: {key[0]} / Target: {key[1]}" for key in sorted_keys}
+
+
 ACTION_NAMES = ['left', 'right', 'forward', 'pickup', 'drop', 'toggle', 'done']
 
 
@@ -634,6 +705,8 @@ def plot_grouped_routing(
         group_labels = door_and_box_row_labels_for_groups(sorted_keys)
     elif group_by == 'carrying_phase':
         group_labels = carrying_phase_labels_for_groups(sorted_keys)
+    elif group_by == 'agent_and_target_quadrant':
+        group_labels = agent_and_target_quadrant_labels_for_groups(sorted_keys)
     else:
         group_labels = {k: f"{group_by}={k}" for k in sorted_keys}
 

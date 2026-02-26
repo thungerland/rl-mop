@@ -15,6 +15,33 @@ from minigrid.envs.babyai import *
 from mixture_of_experts import MixtureOfExpertsPolicy, reset_hidden_on_done, compute_lpc
 
 
+def _first_target_pos(instr):
+    """Recursively extract first target object position from a BabyAI instruction.
+
+    Uses duck typing to handle GoToInstr, PickupInstr, OpenInstr (have .desc),
+    PutNextInstr (has .desc_move), and SeqInstr subclasses (have .instr_a/.instr_b).
+    For compound instructions (BeforeInstr, AfterInstr, AndInstr), uses instr_a
+    (the first sub-task). Returns an (x, y) tuple or None if not extractable.
+    """
+    if instr is None:
+        return None
+    if hasattr(instr, 'desc'):
+        obj_poss = getattr(instr.desc, 'obj_poss', None)
+        if obj_poss:
+            return tuple(int(c) for c in obj_poss[0])
+    if hasattr(instr, 'desc_move'):
+        obj_poss = getattr(instr.desc_move, 'obj_poss', None)
+        if obj_poss:
+            return tuple(int(c) for c in obj_poss[0])
+    if hasattr(instr, 'instr_a'):
+        result = _first_target_pos(instr.instr_a)
+        if result is not None:
+            return result
+    if hasattr(instr, 'instr_b'):
+        return _first_target_pos(instr.instr_b)
+    return None
+
+
 class ReplanTimeout(Exception):
     """Raised when bot.replan() takes too long."""
     pass
@@ -197,6 +224,31 @@ class EvalVectorEnv:
                     context['room_grid_shape'] = (len(env.room_grid[0]), len(env.room_grid))
             except Exception:
                 pass
+
+        # Extract target object position from BabyAI instruction tree.
+        # reset_verifier() is called during env.reset(), so desc.obj_poss is populated.
+        try:
+            instr = getattr(env, 'instrs', None)
+            if instr is not None:
+                target_pos = _first_target_pos(instr)
+                if target_pos is not None:
+                    context['target_pos'] = target_pos
+        except Exception:
+            pass
+
+        # Compute room interior bounds for quadrant calculation.
+        # Stored in context so plotting_utils.py stays free of BabyAI/gym imports.
+        try:
+            if hasattr(env, 'room_from_pos'):
+                room = env.room_from_pos(*env.agent_pos)
+                rx, ry = room.top
+                rw, rh = room.size
+                context['room_bounds'] = (rx + 1, ry + 1, rx + rw - 2, ry + rh - 2)
+            else:
+                w, h = env.grid.width, env.grid.height
+                context['room_bounds'] = (1, 1, w - 2, h - 2)
+        except Exception:
+            pass
 
         for j in range(env.grid.height):
             for i in range(env.grid.width):

@@ -17,9 +17,11 @@ def _():
         plot_grouped_routing,
         group_routing_data,
         get_available_analyses,
+        pos_to_quadrant,
     )
+    from eval_mop import _first_target_pos
 
-    return Path, get_available_analyses, group_routing_data, mo, np, plot_grouped_routing, plot_overall_routing, plt, torch
+    return Path, _first_target_pos, get_available_analyses, group_routing_data, mo, np, plot_grouped_routing, plot_overall_routing, plt, pos_to_quadrant, torch
 
 
 @app.cell
@@ -156,6 +158,7 @@ def _(get_available_analyses, mo, routing_data):
         'By door location': 'by_door_location',
         'By door & box row': 'by_door_and_box_row',
         'By carrying phase': 'by_carrying_phase',
+        'By agent & target quadrant': 'by_agent_and_target_quadrant',
     }
 
     # Filter to only available analyses
@@ -175,7 +178,7 @@ def _(get_available_analyses, mo, routing_data):
 
 
 @app.cell
-def _(group_routing_data, routing_data, task_id):
+def _(_first_target_pos, group_routing_data, pos_to_quadrant, routing_data, task_id):
     import gymnasium as gym
 
     sample_env = gym.make(task_id, render_mode="rgb_array")
@@ -193,10 +196,15 @@ def _(group_routing_data, routing_data, task_id):
     door_box_groups = group_routing_data(routing_data, 'door_and_box_row')
     target_door_box_locations = set(door_box_groups.keys())
 
-    # Generate one env image per starting room / door location / door+box combo
+    # Collect agent+target quadrant keys for per-quadrant-combo image generation
+    quadrant_groups = group_routing_data(routing_data, 'agent_and_target_quadrant')
+    target_quadrant_combos = set(quadrant_groups.keys())
+
+    # Generate one env image per starting room / door location / door+box combo / quadrant combo
     room_env_images = {}
     door_env_images = {}
     door_and_box_env_images = {}
+    quadrant_env_images = {}
     env_image = None
     env_mission = ""
 
@@ -204,6 +212,7 @@ def _(group_routing_data, routing_data, task_id):
         len(room_env_images) >= len(target_rooms)
         and len(door_env_images) >= len(target_door_locations)
         and len(door_and_box_env_images) >= len(target_door_box_locations)
+        and len(quadrant_env_images) >= len(target_quadrant_combos)
     )
 
     for _ in range(1000):
@@ -240,15 +249,36 @@ def _(group_routing_data, routing_data, task_id):
                 if combined_key in target_door_box_locations and combined_key not in door_and_box_env_images:
                     door_and_box_env_images[combined_key] = (env_image, env_mission)
 
+        if target_quadrant_combos:
+            try:
+                instr = getattr(uw, 'instrs', None)
+                target_pos = _first_target_pos(instr) if instr is not None else None
+                if target_pos is not None:
+                    if hasattr(uw, 'room_from_pos'):
+                        room = uw.room_from_pos(*uw.agent_pos)
+                        rx, ry = room.top
+                        rw, rh = room.size
+                        room_bounds = (rx + 1, ry + 1, rx + rw - 2, ry + rh - 2)
+                    else:
+                        w, h = uw.grid.width, uw.grid.height
+                        room_bounds = (1, 1, w - 2, h - 2)
+                    aq = pos_to_quadrant(uw.agent_pos[0], uw.agent_pos[1], room_bounds)
+                    tq = pos_to_quadrant(target_pos[0], target_pos[1], room_bounds)
+                    quad_key = (aq, tq)
+                    if quad_key in target_quadrant_combos and quad_key not in quadrant_env_images:
+                        quadrant_env_images[quad_key] = (env_image, env_mission)
+            except Exception:
+                pass
+
         if all_targets_found():
             break
 
     sample_env.close()
-    return door_and_box_env_images, door_env_images, env_image, env_mission, room_env_images
+    return door_and_box_env_images, door_env_images, env_image, env_mission, quadrant_env_images, room_env_images
 
 
 @app.cell
-def _(analysis_dropdown, door_and_box_env_images, door_env_images, env_image, env_mission, plot_grouped_routing, plot_overall_routing, room_env_images, routing_data):
+def _(analysis_dropdown, door_and_box_env_images, door_env_images, env_image, env_mission, plot_grouped_routing, plot_overall_routing, quadrant_env_images, room_env_images, routing_data):
     if analysis_dropdown.value == 'by_starting_room':
         fig_heatmap = plot_grouped_routing(
             routing_data=routing_data,
@@ -280,6 +310,15 @@ def _(analysis_dropdown, door_and_box_env_images, door_env_images, env_image, en
             group_by='carrying_phase',
             env_image=env_image,
             env_mission=env_mission,
+        )
+    elif analysis_dropdown.value == 'by_agent_and_target_quadrant':
+        fig_heatmap = plot_grouped_routing(
+            routing_data=routing_data,
+            group_by='agent_and_target_quadrant',
+            env_image=env_image,
+            env_mission=env_mission,
+            room_env_images=quadrant_env_images,
+            max_groups=16,
         )
     else:
         fig_heatmap = plot_overall_routing(
@@ -319,6 +358,8 @@ def _(Path, analysis_dropdown, fig_heatmap, mo, save_button, task_id, trial):
             _suffix = "_by_door_and_box_row"
         elif analysis_dropdown.value == "by_carrying_phase":
             _suffix = "_by_carrying_phase"
+        elif analysis_dropdown.value == "by_agent_and_target_quadrant":
+            _suffix = "_by_agent_and_target_quadrant"
         else:
             _suffix = ""
         _filename = f"routing_heatmap{_suffix}.png"
