@@ -183,6 +183,145 @@ def eval_main(
 
 
 @app.local_entrypoint()
+def eval_parallel(
+    num_episodes: int = 1000,
+    force: bool = False,
+    task: str = None,
+    trial: int = None,
+    skip_routing: bool = False,
+):
+    """
+    Discover unevaluated checkpoints locally and launch one Modal eval_run job
+    per missing checkpoint in parallel.
+
+    Compares modal_checkpoints/ against evaluation_results.csv using (task_id, trial)
+    as the canonical key to correctly handle the path prefix difference between
+    local modal_checkpoints/ and Modal's /checkpoints/.
+
+    Usage examples:
+        # Evaluate all missing checkpoints (1000 episodes each)
+        modal run modal_app.py::eval_parallel
+
+        # Force re-evaluate everything
+        modal run modal_app.py::eval_parallel --force
+
+        # Custom episode count
+        modal run modal_app.py::eval_parallel --num-episodes 500
+
+        # Only evaluate a specific task's missing trials
+        modal run modal_app.py::eval_parallel --task "BabyAI-GoToSeq-v0"
+
+        # After completion, download results:
+        modal volume get rl-mop-eval /eval_output/evaluation_results.csv ./evaluation_results.csv
+        modal volume get rl-mop-eval /eval_output/evaluation_cache ./evaluation_cache
+    """
+    import csv
+    from pathlib import Path
+
+    # Discover all local checkpoints
+    checkpoint_base = Path("modal_checkpoints")
+    if not checkpoint_base.exists():
+        print(f"Error: '{checkpoint_base}' directory not found. Download checkpoints first.")
+        return
+
+    local_checkpoints = []
+    for checkpoint_path in checkpoint_base.glob("**/checkpoint_final.pt"):
+        task_id = checkpoint_path.parent.parent.name
+        trial_str = checkpoint_path.parent.name
+        try:
+            trial_num = int(trial_str.split("_")[1])
+        except (IndexError, ValueError):
+            print(f"Warning: Could not parse trial from {checkpoint_path}, skipping.")
+            continue
+        local_checkpoints.append((task_id, trial_num))
+    local_checkpoints.sort()
+
+    # Load evaluated keys from CSV using (task_id, trial) columns directly
+    evaluated = set()
+    csv_path = Path("evaluation_results.csv")
+    if csv_path.exists():
+        with open(csv_path) as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                evaluated.add((row["task_id"], str(row["trial"])))
+
+    # Compute missing set
+    if force:
+        missing = list(local_checkpoints)
+    else:
+        missing = [
+            (t, n) for t, n in local_checkpoints
+            if (t, str(n)) not in evaluated
+        ]
+
+    # Apply optional task/trial filters
+    if task:
+        missing = [(t, n) for t, n in missing if t == task]
+    if trial is not None:
+        missing = [(t, n) for t, n in missing if n == trial]
+
+    # Print summary
+    print(f"Local checkpoints found: {len(local_checkpoints)}")
+    print(f"Already evaluated:       {len(evaluated)}")
+    print(f"Jobs to launch:          {len(missing)}")
+    if force:
+        print("  (--force: re-evaluating all)")
+    print()
+
+    if not missing:
+        print("Nothing to evaluate. Use --force to re-evaluate existing results.")
+        return
+
+    print("Checkpoints to evaluate:")
+    for task_id, trial_num in missing:
+        print(f"  - {task_id}/trial_{trial_num}")
+    print()
+
+    # Spawn one eval_run per missing checkpoint
+    jobs = []
+    for task_id, trial_num in missing:
+        print(f"  Queuing: {task_id} trial {trial_num}")
+        job = eval_run.spawn(
+            num_episodes=num_episodes,
+            force=force,
+            task=task_id,
+            trial=trial_num,
+            skip_routing=skip_routing,
+        )
+        jobs.append((task_id, trial_num, job))
+
+    print(f"\n{len(jobs)} job(s) queued. Waiting for completion...")
+    print("(You can Ctrl+C to detach — jobs will continue running on Modal)\n")
+
+    # Collect results
+    failures = []
+    for task_id, trial_num, job in jobs:
+        try:
+            return_code = job.get()
+            if return_code == 0:
+                print(f"  Success: {task_id}/trial_{trial_num}")
+            else:
+                print(f"  Failed (exit code {return_code}): {task_id}/trial_{trial_num}")
+                failures.append((task_id, trial_num))
+        except Exception as e:
+            print(f"  Error: {task_id}/trial_{trial_num} - {e}")
+            failures.append((task_id, trial_num))
+
+    print()
+    if not failures:
+        print(f"All {len(jobs)} job(s) completed successfully.")
+    else:
+        print(f"{len(jobs) - len(failures)}/{len(jobs)} job(s) succeeded.")
+        print("Failed checkpoints:")
+        for task_id, trial_num in failures:
+            print(f"  - {task_id}/trial_{trial_num}")
+
+    print("\nDownload results with:")
+    print("  modal volume get rl-mop-eval /eval_output/evaluation_results.csv ./evaluation_results.csv")
+    print("  modal volume get rl-mop-eval /eval_output/evaluation_cache ./evaluation_cache")
+
+
+@app.local_entrypoint()
 def main(
     task_ids: str,
     trials: str,
