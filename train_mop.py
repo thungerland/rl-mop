@@ -98,10 +98,10 @@ class VectorBabyAIEnv:
         self.expert_steps = np.zeros(num_envs, dtype=int) # bot steps
         self.total_episodes = 0
         self.successful_episodes = 0
-        self.recent_successes = deque(maxlen=50)
+        self.recent_successes = deque(maxlen=100)
         self.sum_path_ratio = 0.0
         self.num_successful_with_ratio = 0
-        self.recent_path_ratios = deque(maxlen=50) # metric to track improvements in planning efficiency
+        self.recent_path_ratios = deque(maxlen=100) # metric to track improvements in planning efficiency
         self.bot_plan_failures = 0  # count of fresh-env resets where bot failed to plan
 
         for p in self.lang_encoder.parameters():
@@ -694,7 +694,7 @@ def main():
 
             # Success rate which is local and recent 
             if len(vec_env.recent_successes) > 0:
-                recent_success_rate = np.mean(vec_env.recent_successes)
+                recent_success_rate = sum(vec_env.recent_successes) / vec_env.recent_successes.maxlen
             else:
                 recent_success_rate = float("nan")
 

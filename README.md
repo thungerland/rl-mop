@@ -16,7 +16,10 @@ python train_mop.py --task_id BabyAI-GoToImpUnlock-v0 --trial 0 --max_steps 1500
 **Modal (cloud) training:**
 ```bash
 # Use --detach for running in the background
-modal run modal_app.py --task-ids "BabyAI-GoToObj-v0" --trials "0" --script train_mop.py 
+modal run --detach modal_app.py::main --task-ids "BabyAI-GoToObj-v0" --trials "0" --script train_mop.py
+
+# Multiple tasks and trials in parallel
+modal run --detach modal_app.py::main --task-ids "BabyAI-GoToObj-v0,BabyAI-UnlockPickup-v0" --trials "0,1,2"
 ```
 
 ### 2. Get Checkpoints
@@ -37,26 +40,31 @@ cp -r modal_checkpoints/* checkpoints/
 
 ### 3. Evaluate
 
-**Batch evaluation on Modal (recommended):**
-```bash
-# Evaluate all checkpoints on Modal (1000 episodes each, default)
-modal run modal_app.py::eval_main
+**Parallel evaluation on Modal (recommended):**
 
-# Force re-evaluation
-modal run modal_app.py::eval_main --force
+Compares `modal_checkpoints/` against the local `evaluation_results.csv` and spawns one GPU job per missing checkpoint in parallel — much faster than the sequential fallback.
+
+```bash
+# Evaluate all missing checkpoints (1000 episodes each, default)
+modal run modal_app.py::eval_parallel
 
 # Custom episode count
-modal run modal_app.py::eval_main --num-episodes 500
+modal run modal_app.py::eval_parallel --num-episodes 500
 
-# Evaluate a single task
-modal run modal_app.py::eval_main --task "BabyAI-UnlockPickup-v0"
+# Force re-evaluate everything
+modal run modal_app.py::eval_parallel --force
+
+# Only evaluate a specific task's missing trials
+modal run modal_app.py::eval_parallel --task "BabyAI-UnlockPickup-v0"
 
 # After completion, download results locally
-modal volume get rl-mop-eval /evaluation_cache ./evaluation_cache
 modal volume get rl-mop-eval /evaluation_results.csv ./evaluation_results.csv
+modal volume get rl-mop-eval /evaluation_cache ./evaluation_cache
 ```
 
 Results are written to the `rl-mop-eval` Modal volume and downloaded on demand. The `evaluation_cache/` folder is what `routing_viz.py` and `logit_viz.py` read from.
+
+> `eval_main` is a simpler alternative that runs all evaluations sequentially in a single container (`modal run modal_app.py::eval_main`).
 
 **Local batch evaluation (alternative):**
 ```bash
