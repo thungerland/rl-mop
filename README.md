@@ -57,9 +57,12 @@ modal run modal_app.py::eval_parallel --force
 # Only evaluate a specific task's missing trials
 modal run modal_app.py::eval_parallel --task "BabyAI-UnlockPickup-v0"
 
-# After completion, download results locally
+# After completion, download results locally (--force)
 modal volume get rl-mop-eval /evaluation_results.csv ./evaluation_results.csv
-modal volume get rl-mop-eval /evaluation_cache ./evaluation_cache
+modal volume get rl-mop-eval /evaluation_cache .
+
+# To download only a specific newly-evaluated task without overwriting everything else:
+modal volume get rl-mop-eval /evaluation_cache/BabyAI-SomeTask-v0 ./evaluation_cache/
 ```
 
 Results are written to the `rl-mop-eval` Modal volume and downloaded on demand. The `evaluation_cache/` folder is what `routing_viz.py` and `logit_viz.py` read from.
