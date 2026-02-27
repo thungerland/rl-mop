@@ -15,7 +15,17 @@ image = (
     .apt_install("git")
     .pip_install_from_requirements("requirements.txt")
     .pip_install("git+https://github.com/mila-iqia/babyai.git")
-    .add_local_dir(".", remote_path="/root/project")
+    .add_local_dir(".", remote_path="/root/project", ignore=[
+        "evaluation_cache",
+        "evaluation_results.csv",
+        "modal_checkpoints",
+        "checkpoints",
+        "plots",
+        "wandb",
+        "__pycache__",
+        "__marimo__",
+        "*.ipynb",
+    ])
 )
 
 @app.function(

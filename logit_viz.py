@@ -29,58 +29,47 @@ def _():
 
 @app.cell
 def _(Path, mo):
-    # Checkpoint selector — scans modal_checkpoints/ and checkpoints/ for .pt files.
-    # logit_viz always loads from cache (no fresh eval), since action_logits only exist in v3 cache files.
-    checkpoint_dirs = [Path("modal_checkpoints"), Path("checkpoints")]
-    checkpoints = []
-    for checkpoint_dir in checkpoint_dirs:
-        if checkpoint_dir.exists():
-            for cp in checkpoint_dir.glob("**/*.pt"):
-                checkpoints.append((checkpoint_dir, cp))
+    # Cache selector — scans evaluation_cache/ for routing_data.json files.
+    # logit_viz always loads from cache, since action_logits only exist in v3 cache files.
+    cache_base = Path("evaluation_cache")
+    cache_options = {}
+    if cache_base.exists():
+        for task_dir in sorted(cache_base.iterdir()):
+            if not task_dir.is_dir():
+                continue
+            for trial_dir in sorted(task_dir.iterdir()):
+                if not trial_dir.is_dir():
+                    continue
+                cache_file = trial_dir / "routing_data.json"
+                if cache_file.exists():
+                    label = f"{task_dir.name}/{trial_dir.name}"
+                    cache_options[label] = str(cache_file)
 
-    checkpoint_options = {
-        str(cp.relative_to(base)): str(cp)
-        for base, cp in checkpoints
-    }
-
-    checkpoint_dropdown = mo.ui.dropdown(
-        options=checkpoint_options,
-        label="Select Checkpoint",
-        value=list(checkpoint_options.keys())[0] if checkpoint_options else None
+    task_dropdown = mo.ui.dropdown(
+        options=cache_options,
+        label="Select Task / Trial",
+        value=list(cache_options.keys())[0] if cache_options else None
     )
 
     mo.vstack([
         mo.md("## Configuration"),
-        checkpoint_dropdown,
+        task_dropdown,
     ])
-    return (checkpoint_dropdown,)
+    return (task_dropdown,)
 
 
 @app.cell
-def _(Path, checkpoint_dropdown, json, mo, np):
-    # Cache loader — reads routing_data.json for the selected checkpoint.
+def _(Path, json, mo, np, task_dropdown):
+    # Cache loader — reads routing_data.json for the selected task/trial.
     # Shows a warning if action_logits are missing (old cache, needs re-evaluation).
-    import torch
-    from mixture_of_experts import MixtureOfExpertsPolicy
-    from eval_mop import load_checkpoint
+    mo.stop(not task_dropdown.value, mo.md("**Select a task above to begin.**"))
 
-    mo.stop(not checkpoint_dropdown.value, mo.md("**Select a checkpoint above to begin.**"))
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    _, config, _ = load_checkpoint(checkpoint_dropdown.value, device)
-    task_id = config['task_id']
-    trial = config['trial']
-
-    cache_path = Path("evaluation_cache") / task_id / f"trial_{trial}" / "routing_data.json"
-
-    mo.stop(
-        not cache_path.exists(),
-        mo.md(f"**Cache not found at `{cache_path}`. Run evaluation first to generate it.**")
-    )
-
+    cache_path = Path(task_dropdown.value)
     with open(cache_path) as _f:
         _cached = json.load(_f)
+
+    task_id = _cached['task_id']
+    trial = _cached['trial']
 
     _episodes = _cached.get('episodes')
     routing_data = [

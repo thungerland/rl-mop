@@ -7,7 +7,6 @@ app = marimo.App(width="full")
 @app.cell
 def _():
     import marimo as mo
-    import torch
     import numpy as np
     import matplotlib.pyplot as plt
     from pathlib import Path
@@ -21,122 +20,79 @@ def _():
     )
     from eval_mop import _first_target_pos
 
-    return Path, _first_target_pos, get_available_analyses, group_routing_data, mo, np, plot_grouped_routing, plot_overall_routing, plt, pos_to_quadrant, torch
+    return Path, _first_target_pos, get_available_analyses, group_routing_data, mo, np, plot_grouped_routing, plot_overall_routing, plt, pos_to_quadrant
 
 
 @app.cell
 def _(Path, mo):
-    # Find available checkpoints (check both directories)
-    checkpoint_dirs = [Path("modal_checkpoints"), Path("checkpoints")]
-    checkpoints = []
-    for checkpoint_dir in checkpoint_dirs:
-        if checkpoint_dir.exists():
-            for cp in checkpoint_dir.glob("**/*.pt"):
-                checkpoints.append((checkpoint_dir, cp))
+    # Find available tasks from the evaluation cache
+    cache_base = Path("evaluation_cache")
+    cache_options = {}
+    if cache_base.exists():
+        for task_dir in sorted(cache_base.iterdir()):
+            if not task_dir.is_dir():
+                continue
+            for trial_dir in sorted(task_dir.iterdir()):
+                if not trial_dir.is_dir():
+                    continue
+                cache_file = trial_dir / "routing_data.json"
+                if cache_file.exists():
+                    label = f"{task_dir.name}/{trial_dir.name}"
+                    cache_options[label] = str(cache_file)
 
-    checkpoint_options = {
-        str(cp.relative_to(base)): str(cp)
-        for base, cp in checkpoints
-    }
-
-    # UI for checkpoint selection
-    checkpoint_dropdown = mo.ui.dropdown(
-        options=checkpoint_options,
-        label="Select Checkpoint",
-        value=list(checkpoint_options.keys())[0] if checkpoint_options else None
-    )
-
-    # Cache toggle
-    use_cache_toggle = mo.ui.checkbox(
-        label="Use cached routing data (if available)",
-        value=True
-    )
-
-    # Number of episodes for evaluation (used when not using cache)
-    num_episodes_slider = mo.ui.slider(
-        start=10, stop=10000, value=50, step=100,
-        label="Number of Episodes (for fresh evaluation)"
-    )
-
-    # Number of parallel environments
-    num_envs_slider = mo.ui.slider(
-        start=1, stop=16, value=8, step=1,
-        label="Parallel Environments"
+    task_dropdown = mo.ui.dropdown(
+        options=cache_options,
+        label="Select Task / Trial",
+        value=list(cache_options.keys())[0] if cache_options else None
     )
 
     mo.vstack([
         mo.md("## Configuration"),
-        checkpoint_dropdown,
-        use_cache_toggle,
-        num_episodes_slider,
-        num_envs_slider,
+        task_dropdown,
     ])
-    return checkpoint_dropdown, num_envs_slider, num_episodes_slider, use_cache_toggle
+    return (task_dropdown,)
 
 
 @app.cell
-def _(Path, checkpoint_dropdown, mo, np, num_envs_slider, num_episodes_slider, torch, use_cache_toggle):
+def _(Path, mo, np, task_dropdown):
     import json
-    from mixture_of_experts import MixtureOfExpertsPolicy, reset_hidden_on_done, compute_lpc
-    from eval_mop import EvalVectorEnv, encode_obs_batch, load_checkpoint, evaluate
 
-    mo.stop(not checkpoint_dropdown.value, mo.md("**Select a checkpoint above to begin.**"))
+    mo.stop(not task_dropdown.value, mo.md("**Select a task above to begin.**"))
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    cache_path = Path(task_dropdown.value)
+    with open(cache_path) as f:
+        cached = json.load(f)
 
-    # Load checkpoint to get config
-    policy, config, _ = load_checkpoint(checkpoint_dropdown.value, device)
-    task_id = config['task_id']
-    trial = config['trial']
+    task_id = cached['task_id']
+    trial = cached['trial']
 
-    # Check for cached routing data
-    cache_path = Path("evaluation_cache") / task_id / f"trial_{trial}" / "routing_data.json"
-    cache_exists = cache_path.exists()
-
-    if use_cache_toggle.value and cache_exists:
-        # Load from cache
-        with open(cache_path) as f:
-            cached = json.load(f)
-
-        # Convert cached data back to expected format.
-        # Support three formats:
-        #   v1: per-timestep env_context embedded in each record
-        #   v2: deduplicated episodes list, each record has an 'episode' index
-        #   legacy: no env_context at all
-        #   v3: includes 'action_logits' list of 7 floats per timestep
-        episodes = cached.get('episodes')
-        routing_data = [
-            {
-                'position': tuple(r['position']),
-                'layer_routing': {k: np.array(v) for k, v in r['layer_routing'].items()},
-                'lpc': r['lpc'],
-                'env_context': episodes[r['episode']] if episodes is not None else r.get('env_context', {}),
-                'carrying': r.get('carrying', 0),
-                'action_logits': np.array(r['action_logits'], dtype=np.float32) if 'action_logits' in r else None,
-            }
-            for r in cached['routing_data']
-        ]
-        metrics = {
-            'success_rate': cached['metrics']['success_rate'],
-            'path_ratio': cached['metrics']['path_ratio'],
-            'mean_lpc': cached['metrics']['mean_lpc'],
-            'total_episodes': cached['num_episodes'],
+    # Support three cache formats:
+    #   v1: per-timestep env_context embedded in each record
+    #   v2: deduplicated episodes list, each record has an 'episode' index
+    #   legacy: no env_context at all
+    #   v3: includes 'action_logits' list of 7 floats per timestep
+    episodes = cached.get('episodes')
+    routing_data = [
+        {
+            'position': tuple(r['position']),
+            'layer_routing': {k: np.array(v) for k, v in r['layer_routing'].items()},
+            'lpc': r['lpc'],
+            'env_context': episodes[r['episode']] if episodes is not None else r.get('env_context', {}),
+            'carrying': r.get('carrying', 0),
+            'action_logits': np.array(r['action_logits'], dtype=np.float32) if 'action_logits' in r else None,
         }
-        data_source = f"Loaded from cache ({cached['evaluated_at'][:10]})"
-    else:
-        # Run fresh evaluation
-        vec_env = EvalVectorEnv(task_id, num_envs_slider.value, device, lang_dim=config.get('lang_dim', 32))
-        metrics, routing_data = evaluate(
-            policy, vec_env, num_episodes_slider.value, device
-        )
-        data_source = "Fresh evaluation"
-
-    cache_status = "available" if cache_exists else "not found"
+        for r in cached['routing_data']
+    ]
+    metrics = {
+        'success_rate': cached['metrics']['success_rate'],
+        'path_ratio': cached['metrics']['path_ratio'],
+        'mean_lpc': cached['metrics']['mean_lpc'],
+        'total_episodes': cached['num_episodes'],
+    }
 
     mo.md(f"""
     ## Evaluation Results
-    - **Source**: {data_source}
-    - **Cache**: {cache_status}
+    - **Source**: Cache ({cached['evaluated_at'][:10]})
     - **Task**: {task_id}
     - **Episodes**: {metrics['total_episodes']}
     - **Success Rate**: {metrics['success_rate']:.1%}

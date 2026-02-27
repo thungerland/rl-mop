@@ -1,0 +1,9 @@
+evaluation_cache/
+evaluation_results.csv
+modal_checkpoints/
+checkpoints/
+plots/
+wandb/
+__pycache__/
+__marimo__/
+*.ipynb
