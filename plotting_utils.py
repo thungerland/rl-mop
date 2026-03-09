@@ -11,6 +11,39 @@ import matplotlib.gridspec as gridspec
 from collections import defaultdict
 
 
+def build_routing_data_tuples(cache: dict) -> list:
+    """Convert a loaded routing_data.json cache dict into the list-of-dicts format
+    consumed by all plotting functions.
+
+    Supports v1 (per-timestep env_context), v2/v3 (deduplicated episodes list).
+    If action_logits are absent (old cache), emits a one-time warning and sets
+    'action_logits' to None per record.
+    """
+    episodes = cache.get('episodes')
+    raw = cache['routing_data']
+
+    has_logits = 'action_logits' in raw[0] if raw else False
+    if not has_logits:
+        import warnings
+        warnings.warn(
+            "Cache has no 'action_logits' (old format). "
+            "Logit-based plots will not work — re-run evaluation to populate them.",
+            stacklevel=2,
+        )
+
+    return [
+        {
+            'position': tuple(r['position']),
+            'layer_routing': {k: np.array(v) for k, v in r['layer_routing'].items()},
+            'lpc': r['lpc'],
+            'env_context': episodes[r['episode']] if episodes is not None else r.get('env_context', {}),
+            'carrying': r.get('carrying', 0),
+            'action_logits': np.array(r['action_logits'], dtype=np.float32) if 'action_logits' in r else None,
+        }
+        for r in raw
+    ]
+
+
 def _make_expert_cmap(light_color, dark_color, name):
     """Create a colormap from a light to dark shade for expert confidence gradients."""
     return mcolors.LinearSegmentedColormap.from_list(name, [light_color, dark_color], N=256)
