@@ -63,8 +63,8 @@ def _(Path, mo, np, task_dropdown):
     with open(cache_path) as f:
         cached = json.load(f)
 
-    task_id = cached['task_id']
-    trial = cached['trial']
+    task_id = Path(cached['checkpoint_path']).parent.parent.name
+    trial = int(Path(cached['checkpoint_path']).parent.name.split('_')[1])
 
     # Support three cache formats:
     #   v1: per-timestep env_context embedded in each record

@@ -68,8 +68,8 @@ def _(Path, json, mo, np, task_dropdown):
     with open(cache_path) as _f:
         _cached = json.load(_f)
 
-    task_id = _cached['task_id']
-    trial = _cached['trial']
+    task_id = Path(_cached['checkpoint_path']).parent.parent.name
+    trial = int(Path(_cached['checkpoint_path']).parent.name.split('_')[1])
 
     _episodes = _cached.get('episodes')
     routing_data = [
@@ -159,6 +159,7 @@ def _(plot_type_dropdown, task_id):
     env_mission = ""
 
     if plot_type_dropdown.value == 'entropy_heatmap':
+        import minigrid  # registers BabyAI envs with gymnasium
         _sample_env = gym.make(task_id, render_mode="rgb_array")
         _uw = _sample_env.unwrapped
         _obs, _ = _sample_env.reset()
