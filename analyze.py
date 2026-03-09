@@ -27,8 +27,6 @@ name to ALL_TYPES, add a branch in section 4, and add its filename in section 5.
 import sys
 import json
 import pathlib
-import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from plotting_utils import (
@@ -214,9 +212,8 @@ elif plot_type == "action_frequency_carrying":
 elif plot_type == "entropy_heatmap":
     fig = plot_action_entropy_heatmap(routing_data, env_image=env_image, env_mission=env_mission)
 
-# ── 5. Save ───────────────────────────────────────────────────────────────────
+# ── 5. Preview & optionally save ──────────────────────────────────────────────
 out_dir = pathlib.Path("plots") / task_id / f"trial_{trial}"
-out_dir.mkdir(parents=True, exist_ok=True)
 
 filename_map = {
     "overall":                       "routing_heatmap.png",
@@ -231,6 +228,16 @@ filename_map = {
 }
 
 out_path = out_dir / filename_map[plot_type]
-fig.savefig(out_path, dpi=150, bbox_inches="tight")
+
+plt.show(block=False)
+plt.pause(0.1)
+
+answer = input(f"Save to {out_path}? [y/N] ").strip().lower()
+if answer == "y":
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    print(f"Saved → {out_path}")
+else:
+    print("Not saved.")
+
 plt.close(fig)
-print(f"Saved → {out_path}")
