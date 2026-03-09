@@ -262,8 +262,8 @@ class EvalVectorEnv:
                 if obj_type == 'goal':
                     context['goals'].append((i, j, color))
                 elif obj_type == 'door':
-                    is_open = getattr(cell, 'is_open', False)
-                    is_locked = getattr(cell, 'is_locked', False)
+                    is_open = bool(getattr(cell, 'is_open', False))
+                    is_locked = bool(getattr(cell, 'is_locked', False))
                     context['doors'].append((i, j, color, is_open, is_locked))
                 elif obj_type == 'key':
                     context['keys'].append((i, j, color))
