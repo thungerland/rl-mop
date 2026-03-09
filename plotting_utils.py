@@ -888,9 +888,11 @@ def plot_action_entropy_heatmap(
     env_mission: str = "",
 ) -> plt.Figure:
     """
-    Spatial heatmap of mean softmax entropy per grid cell.
+    Spatial heatmap of action entropy per grid cell.
 
-    H = -sum(p * log(p + 1e-9)) where p = softmax(logits).
+    H = -sum(p̄ * log(p̄ + 1e-9)) where p̄ = mean softmax(logits) across all visits to that position.
+    Averages action probabilities first, then computes entropy, so the result reflects
+    how spread the preferred actions are across episodes at each position.
     Shows where the agent is most/least uncertain.
 
     Args:
@@ -909,17 +911,19 @@ def plot_action_entropy_heatmap(
         ax.axis('off')
         return fig
 
-    # Accumulate entropy values per position
-    position_entropies = defaultdict(list)
+    # Accumulate softmax probabilities per position, then compute entropy of the mean
+    position_probs = defaultdict(list)
     for s in valid:
         logits = s['action_logits'].astype(np.float64)
         logits_shifted = logits - logits.max()
         exp_logits = np.exp(logits_shifted)
         p = exp_logits / exp_logits.sum()
-        entropy = -np.sum(p * np.log(p + 1e-9))
-        position_entropies[s['position']].append(entropy)
+        position_probs[s['position']].append(p)
 
-    avg_entropy_by_pos = {pos: np.mean(vals) for pos, vals in position_entropies.items()}
+    avg_entropy_by_pos = {}
+    for pos, probs_list in position_probs.items():
+        mean_p = np.mean(probs_list, axis=0)
+        avg_entropy_by_pos[pos] = -np.sum(mean_p * np.log(mean_p + 1e-9))
     positions = list(avg_entropy_by_pos.keys())
     grid_info = compute_grid_bounds(positions)
 
