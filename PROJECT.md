@@ -145,11 +145,20 @@ plots/<task_id>/trial_<N>/routing_heatmap[_by_starting_room].png
 
 ## Visualization Strategy
 
-**Extend within the existing pattern — don't create new scripts per plot type.**
+### Current phase: focused single-task iteration
+
+The project is in a focused analysis phase (1-2 day research question → plot → answer cycles) targeting 1-2 tasks at a time. New plots should be local-first using `analyze.py`:
 
 - New plot functions → add to `plotting_utils.py`
-- New interactive views → add tabs in `routing_viz.py` via `mo.ui.tabs()`
-- Cross-task comparisons → create a second marimo notebook (e.g. `cross_task_viz.py`) that reads `evaluation_results.csv` + multiple cache files
+- Call from `analyze.py` — no marimo wiring needed
+- `analyze.py` handles cache loading, env image sampling, and saving automatically
+
+**Do not** add new plot types to the marimo notebooks unless they need to work across all cached tasks. The marimo notebooks remain for broad exploration only.
+
+### General rules
+
+- All plot logic lives in `plotting_utils.py` (stateless, reusable functions)
+- Cross-task comparisons → create a separate marimo notebook (e.g. `cross_task_viz.py`) that reads `evaluation_results.csv` + multiple cache files
 - Split `plotting_utils.py` into a `plotting/` package only when it exceeds ~1000 lines
 - If a new plot needs data not currently cached, extend `evaluate()` in `eval_mop.py` and update the cache schema
 

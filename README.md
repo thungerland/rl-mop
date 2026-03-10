@@ -113,20 +113,30 @@ print(df.sort_values('success_rate', ascending=False)[['task_id', 'trial', 'succ
 python eval_mop.py --checkpoint checkpoints/BabyAI-GoToObj-v0/trial_0/checkpoint_final.pt --num_episodes 100
 ```
 
-**Routing visualization (marimo notebook):**
+**Focused analysis (recommended for single-task iteration):**
+```bash
+python analyze.py <task_id> <trial> [plot_type]
+
+# Examples
+python analyze.py BabyAI-GoToDoor-v0 0
+python analyze.py BabyAI-GoToDoor-v0 0 by_carrying_phase
+python analyze.py BabyAI-GoToDoor-v0 0 action_frequency
+```
+Generates and previews a plot, then prompts whether to save. Reads from `evaluation_cache/` (no marimo required). Available plot types:
+- `overall` (default) — routing heatmap across all data
+- `by_starting_room`, `by_door_location`, `by_door_and_box_row`, `by_carrying_phase`, `by_agent_and_target_quadrant` — grouped routing heatmaps
+- `action_frequency`, `action_frequency_carrying`, `entropy_heatmap` — logit/distributional analyses
+
+New plot types: add a function to `plotting_utils.py`, import and add a branch in `analyze.py`.
+
+**Routing visualization (marimo notebook — broad exploration across tasks):**
 ```bash
 marimo run routing_viz.py
 ```
-This opens an interactive notebook showing:
-- Environment layout
-- Expert routing heatmaps by grid position (overall, by starting room, door location, carrying phase, etc.)
+Interactive notebook for exploring routing heatmaps across all cached tasks.
 
-The notebook loads cached routing data by default (from `batch_eval.py`). Uncheck "Use cached routing data" to run fresh evaluation.
-
-**Logit / distributional analysis (marimo notebook):**
+**Logit / distributional analysis (marimo notebook — broad exploration across tasks):**
 ```bash
 marimo run logit_viz.py
 ```
-Complements `routing_viz.py` with non-spatial, distributional analyses. Requires a v3 cache file (produced by `batch_eval.py` without `--skip_routing`). Plot types:
-- **Action frequency** — bar chart of how often each action is chosen, optionally split by carrying phase
-- **Action entropy heatmap** — spatial heatmap of mean policy entropy per grid cell (high = uncertain)
+Interactive notebook for action frequency and entropy heatmap plots across all cached tasks. Requires a v3 cache file (produced by `batch_eval.py` without `--skip_routing`).
