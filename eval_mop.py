@@ -477,13 +477,18 @@ def evaluate(policy, vec_env, num_episodes, device):
 
                 # Include environment context, carrying state, and action logits
                 carrying = int(vec_env.obs_list[i].get('carrying_flag', 0))
+                logits_np = logits[i].cpu().numpy().astype(np.float64)
+                logits_shifted = logits_np - logits_np.max()
+                exp_l = np.exp(logits_shifted)
+                probs = exp_l / exp_l.sum()
                 routing_data.append({
                     'position': pos,
                     'layer_routing': layer_routing,
                     'lpc': sample_lpc,
                     'env_context': env_contexts[i],
                     'carrying': carrying,
-                    'action_logits': logits[i].cpu().numpy(),
+                    'action_logits': logits_np,
+                    'entropy': float(-np.sum(probs * np.log(probs + 1e-9))),
                 })
 
             # Sample actions (greedy for eval)

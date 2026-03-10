@@ -13,7 +13,8 @@ plot_type options (default: overall):
     by_agent_and_target_quadrant — routing heatmap grouped by agent & target quadrant
     action_frequency             — bar chart of action frequencies
     action_frequency_carrying    — action frequency split by carrying phase
-    entropy_heatmap              — spatial entropy heatmap of action logits
+    across_episode_entropy_heatmap — entropy of mean action distribution per grid cell
+    per_timestep_entropy_heatmap   — mean per-timestep action entropy per grid cell
 
 Examples:
     python analyze.py BabyAI-GoToDoor-v0 0
@@ -34,7 +35,8 @@ from plotting_utils import (
     plot_overall_routing,
     plot_grouped_routing,
     plot_action_frequency,
-    plot_action_entropy_heatmap,
+    plot_across_episode_entropy_heatmap,
+    plot_per_timestep_entropy_heatmap,
     group_routing_data,
     pos_to_quadrant,
 )
@@ -60,7 +62,8 @@ GROUPED_ROUTING_TYPES = {
 ALL_TYPES = {"overall"} | GROUPED_ROUTING_TYPES | {
     "action_frequency",
     "action_frequency_carrying",
-    "entropy_heatmap",
+    "across_episode_entropy_heatmap",
+    "per_timestep_entropy_heatmap",
 }
 
 if plot_type not in ALL_TYPES:
@@ -209,8 +212,11 @@ elif plot_type == "action_frequency":
 elif plot_type == "action_frequency_carrying":
     fig = plot_action_frequency(routing_data, group_by="carrying")
 
-elif plot_type == "entropy_heatmap":
-    fig = plot_action_entropy_heatmap(routing_data, env_image=env_image, env_mission=env_mission)
+elif plot_type == "across_episode_entropy_heatmap":
+    fig = plot_across_episode_entropy_heatmap(routing_data, env_image=env_image, env_mission=env_mission)
+
+elif plot_type == "per_timestep_entropy_heatmap":
+    fig = plot_per_timestep_entropy_heatmap(routing_data, env_image=env_image, env_mission=env_mission)
 
 # ── 5. Preview & optionally save ──────────────────────────────────────────────
 out_dir = pathlib.Path("plots") / task_id / f"trial_{trial}"
@@ -224,7 +230,8 @@ filename_map = {
     "by_agent_and_target_quadrant":  "routing_heatmap_by_agent_and_target_quadrant.png",
     "action_frequency":              "logit_action_frequency.png",
     "action_frequency_carrying":     "logit_action_frequency_carrying.png",
-    "entropy_heatmap":               "logit_entropy_heatmap.png",
+    "across_episode_entropy_heatmap": "logit_across_episode_entropy_heatmap.png",
+    "per_timestep_entropy_heatmap":   "logit_per_timestep_entropy_heatmap.png",
 }
 
 out_path = out_dir / filename_map[plot_type]

@@ -39,6 +39,7 @@ def build_routing_data_tuples(cache: dict) -> list:
             'env_context': episodes[r['episode']] if episodes is not None else r.get('env_context', {}),
             'carrying': r.get('carrying', 0),
             'action_logits': np.array(r['action_logits'], dtype=np.float32) if 'action_logits' in r else None,
+            'entropy': r['entropy'] if 'entropy' in r else None,
         }
         for r in raw
     ]
@@ -882,13 +883,13 @@ def plot_action_frequency(routing_data: list, group_by: str = None) -> plt.Figur
     return fig
 
 
-def plot_action_entropy_heatmap(
+def plot_across_episode_entropy_heatmap(
     routing_data: list,
     env_image: np.ndarray = None,
     env_mission: str = "",
 ) -> plt.Figure:
     """
-    Spatial heatmap of action entropy per grid cell.
+    Across-episode action entropy heatmap per grid cell.
 
     H = -sum(p̄ * log(p̄ + 1e-9)) where p̄ = mean softmax(logits) across all visits to that position.
     Averages action probabilities first, then computes entropy, so the result reflects
@@ -955,7 +956,84 @@ def plot_action_entropy_heatmap(
     cmap = plt.cm.plasma.copy()
     cmap.set_bad(color=UNVISITED_COLOR)
     im = axes[plot_idx].imshow(entropy_grid, origin='upper', cmap=cmap)
-    axes[plot_idx].set_title("Mean Action Entropy by Position")
+    axes[plot_idx].set_title("Across-Episode Action Entropy")
+    axes[plot_idx].set_xlabel("X")
+    axes[plot_idx].set_ylabel("Y")
+    axes[plot_idx].set_xticks(np.arange(-0.5, grid_width, 1), minor=True)
+    axes[plot_idx].set_yticks(np.arange(-0.5, grid_height, 1), minor=True)
+    axes[plot_idx].grid(which='minor', color='white', linestyle='-', linewidth=0.5)
+    axes[plot_idx].tick_params(which='minor', size=0)
+    fig.colorbar(im, ax=axes[plot_idx], label='Entropy (nats)')
+
+    fig.tight_layout()
+    return fig
+
+
+def plot_per_timestep_entropy_heatmap(
+    routing_data: list,
+    env_image: np.ndarray = None,
+    env_mission: str = "",
+) -> plt.Figure:
+    """
+    Per-timestep action entropy heatmap per grid cell.
+
+    Uses pre-computed per-timestep entropy values (cached as 'entropy' key).
+    H(p_t) = -sum(p_t * log(p_t + 1e-9)) where p_t = softmax(logits) at timestep t.
+    Averages H(p_t) across all visits to each position — mean(H(p_t)).
+    Reflects average moment-to-moment action uncertainty at each location.
+
+    Args:
+        routing_data: List of dicts with keys position, entropy (pre-computed per timestep)
+        env_image: Optional environment render to show alongside
+        env_mission: Optional mission string
+
+    Returns:
+        matplotlib Figure object
+    """
+    valid = [s for s in routing_data if s.get('entropy') is not None]
+    if not valid:
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.text(0.5, 0.5, "No entropy in data", ha='center', va='center', fontsize=14)
+        ax.axis('off')
+        return fig
+
+    position_entropies = defaultdict(list)
+    for s in valid:
+        position_entropies[s['position']].append(s['entropy'])
+
+    avg_entropy_by_pos = {pos: np.mean(vals) for pos, vals in position_entropies.items()}
+    positions = list(avg_entropy_by_pos.keys())
+    grid_info = compute_grid_bounds(positions)
+
+    grid_width = grid_info['grid_width']
+    grid_height = grid_info['grid_height']
+    x_min = grid_info['x_min']
+    y_min = grid_info['y_min']
+
+    entropy_grid = np.full((grid_height, grid_width), np.nan)
+    for pos, val in avg_entropy_by_pos.items():
+        gx, gy = pos[0] - x_min, pos[1] - y_min
+        entropy_grid[gy, gx] = val
+
+    num_plots = 2 if env_image is not None else 1
+    fig, axes = plt.subplots(1, num_plots, figsize=(5 * num_plots, 5))
+    if num_plots == 1:
+        axes = [axes]
+
+    plot_idx = 0
+    if env_image is not None:
+        axes[plot_idx].imshow(env_image)
+        axes[plot_idx].set_title("Environment Layout")
+        if env_mission:
+            axes[plot_idx].set_xlabel(env_mission, fontsize=9)
+        axes[plot_idx].set_xticks([])
+        axes[plot_idx].set_yticks([])
+        plot_idx += 1
+
+    cmap = plt.cm.plasma.copy()
+    cmap.set_bad(color=UNVISITED_COLOR)
+    im = axes[plot_idx].imshow(entropy_grid, origin='upper', cmap=cmap)
+    axes[plot_idx].set_title("Per-Timestep Action Entropy")
     axes[plot_idx].set_xlabel("X")
     axes[plot_idx].set_ylabel("Y")
     axes[plot_idx].set_xticks(np.arange(-0.5, grid_width, 1), minor=True)

@@ -15,6 +15,7 @@ Usage:
 
 import argparse
 import json
+import numpy as np
 import torch
 import pandas as pd
 from pathlib import Path
@@ -140,15 +141,19 @@ def save_routing_data(routing_data: list, checkpoint_path: Path, config: dict,
             else:
                 layer_routing_json[k] = list(v)
 
+        logits_arr = np.array(action_logits, dtype=np.float64)
+        logits_shifted = logits_arr - logits_arr.max()
+        exp_l = np.exp(logits_shifted)
+        probs = exp_l / exp_l.sum()
         entry = {
             'episode': episode_idx,
             'position': [int(p) for p in pos],
             'layer_routing': layer_routing_json,
             'lpc': float(lpc),
             'carrying': int(carrying),
+            'action_logits': [float(v) for v in action_logits],
+            'entropy': float(-np.sum(probs * np.log(probs + 1e-9))),
         }
-        if action_logits is not None:
-            entry['action_logits'] = [float(v) for v in action_logits]
         routing_json.append(entry)
 
     cache_data = {
