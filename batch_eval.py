@@ -126,7 +126,14 @@ def save_routing_data(routing_data: list, checkpoint_path: Path, config: dict,
         lpc = sample['lpc']
         env_context = sample['env_context']
         carrying = sample.get('carrying', 0)
+        door_unlocked = sample.get('door_unlocked', 0)
         action_logits = sample.get('action_logits')
+        t_step = sample.get('t_step')
+        t_unlocked = sample.get('t_unlocked')
+        t_pick = sample.get('t_pick')
+        dist_to_door = sample.get('dist_to_door')
+        dist_to_key = sample.get('dist_to_key')
+        dist_to_target = sample.get('dist_to_target')
 
         context_key = str(env_context)
         if context_key not in context_to_idx:
@@ -151,8 +158,15 @@ def save_routing_data(routing_data: list, checkpoint_path: Path, config: dict,
             'layer_routing': layer_routing_json,
             'lpc': float(lpc),
             'carrying': int(carrying),
+            'door_unlocked': int(door_unlocked),
             'action_logits': [float(v) for v in action_logits],
             'entropy': float(-np.sum(probs * np.log(probs + 1e-9))),
+            't_step': int(t_step) if t_step is not None else None,
+            't_unlocked': int(t_unlocked) if t_unlocked is not None else None,
+            't_pick': int(t_pick) if t_pick is not None else None,
+            'dist_to_door': float(dist_to_door) if dist_to_door is not None else None,
+            'dist_to_key': float(dist_to_key) if dist_to_key is not None else None,
+            'dist_to_target': float(dist_to_target) if dist_to_target is not None else None,
         }
         routing_json.append(entry)
 
