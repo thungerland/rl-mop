@@ -10,11 +10,21 @@ plot_type options (default: overall):
     by_door_location             — routing heatmap grouped by door position
     by_door_and_box_row          — routing heatmap grouped by door+box configuration
     by_carrying_phase            — routing heatmap grouped by carrying phase
+    by_door_unlocked_phase       — routing heatmap grouped by door locked/unlocked phase
     by_agent_and_target_quadrant — routing heatmap grouped by agent & target quadrant
     action_frequency             — bar chart of action frequencies
     action_frequency_carrying    — action frequency split by carrying phase
-    across_episode_entropy_heatmap — entropy of mean action distribution per grid cell
-    per_timestep_entropy_heatmap   — mean per-timestep action entropy per grid cell
+    across_episode_entropy_heatmap           — entropy of mean action distribution per grid cell
+    per_timestep_entropy_heatmap             — mean per-timestep action entropy per grid cell
+    by_door_location_across_episode_entropy  — across-episode entropy grouped by door location
+    by_door_location_per_timestep_entropy    — per-timestep entropy grouped by door location
+    by_door_and_box_row_across_episode_entropy   — across-episode entropy grouped by door+box row
+    by_door_and_box_row_per_timestep_entropy     — per-timestep entropy grouped by door+box row
+    by_door_unlocked_phase_across_episode_entropy — across-episode entropy grouped by door locked/unlocked phase
+    by_door_unlocked_phase_per_timestep_entropy   — per-timestep entropy grouped by door locked/unlocked phase
+    by_key_phase                         — routing heatmap grouped by key phase (pre-key / post-key pre-unlock / post-unlock)
+    by_key_phase_across_episode_entropy  — across-episode entropy grouped by key phase
+    by_key_phase_per_timestep_entropy    — per-timestep entropy grouped by key phase
 
 Examples:
     python analyze.py BabyAI-GoToDoor-v0 0
@@ -37,6 +47,8 @@ from plotting_utils import (
     plot_action_frequency,
     plot_across_episode_entropy_heatmap,
     plot_per_timestep_entropy_heatmap,
+    plot_grouped_across_episode_entropy_heatmap,
+    plot_grouped_per_timestep_entropy_heatmap,
     group_routing_data,
     pos_to_quadrant,
 )
@@ -56,6 +68,8 @@ GROUPED_ROUTING_TYPES = {
     "by_door_location",
     "by_door_and_box_row",
     "by_carrying_phase",
+    "by_door_unlocked_phase",
+    "by_key_phase",
     "by_agent_and_target_quadrant",
 }
 
@@ -64,6 +78,14 @@ ALL_TYPES = {"overall"} | GROUPED_ROUTING_TYPES | {
     "action_frequency_carrying",
     "across_episode_entropy_heatmap",
     "per_timestep_entropy_heatmap",
+    "by_door_location_across_episode_entropy",
+    "by_door_location_per_timestep_entropy",
+    "by_door_and_box_row_across_episode_entropy",
+    "by_door_and_box_row_per_timestep_entropy",
+    "by_door_unlocked_phase_across_episode_entropy",
+    "by_door_unlocked_phase_per_timestep_entropy",
+    "by_key_phase_across_episode_entropy",
+    "by_key_phase_per_timestep_entropy",
 }
 
 if plot_type not in ALL_TYPES:
@@ -190,6 +212,8 @@ group_by_map = {
     "by_door_location":             ("door_location",             door_env_images),
     "by_door_and_box_row":          ("door_and_box_row",          door_and_box_env_images),
     "by_carrying_phase":            ("carrying_phase",            None),
+    "by_door_unlocked_phase":       ("door_unlocked_phase",       None),
+    "by_key_phase":                 ("key_phase",                 None),
     "by_agent_and_target_quadrant": ("agent_and_target_quadrant", quadrant_env_images),
 }
 
@@ -218,6 +242,54 @@ elif plot_type == "across_episode_entropy_heatmap":
 elif plot_type == "per_timestep_entropy_heatmap":
     fig = plot_per_timestep_entropy_heatmap(routing_data, env_image=env_image, env_mission=env_mission)
 
+elif plot_type == "by_door_location_across_episode_entropy":
+    fig = plot_grouped_across_episode_entropy_heatmap(
+        routing_data, group_by="door_location",
+        env_image=env_image, env_mission=env_mission, room_env_images=door_env_images,
+    )
+
+elif plot_type == "by_door_location_per_timestep_entropy":
+    fig = plot_grouped_per_timestep_entropy_heatmap(
+        routing_data, group_by="door_location",
+        env_image=env_image, env_mission=env_mission, room_env_images=door_env_images,
+    )
+
+elif plot_type == "by_door_and_box_row_across_episode_entropy":
+    fig = plot_grouped_across_episode_entropy_heatmap(
+        routing_data, group_by="door_and_box_row",
+        env_image=env_image, env_mission=env_mission, room_env_images=door_and_box_env_images,
+    )
+
+elif plot_type == "by_door_and_box_row_per_timestep_entropy":
+    fig = plot_grouped_per_timestep_entropy_heatmap(
+        routing_data, group_by="door_and_box_row",
+        env_image=env_image, env_mission=env_mission, room_env_images=door_and_box_env_images,
+    )
+
+elif plot_type == "by_door_unlocked_phase_across_episode_entropy":
+    fig = plot_grouped_across_episode_entropy_heatmap(
+        routing_data, group_by="door_unlocked_phase",
+        env_image=env_image, env_mission=env_mission,
+    )
+
+elif plot_type == "by_door_unlocked_phase_per_timestep_entropy":
+    fig = plot_grouped_per_timestep_entropy_heatmap(
+        routing_data, group_by="door_unlocked_phase",
+        env_image=env_image, env_mission=env_mission,
+    )
+
+elif plot_type == "by_key_phase_across_episode_entropy":
+    fig = plot_grouped_across_episode_entropy_heatmap(
+        routing_data, group_by="key_phase",
+        env_image=env_image, env_mission=env_mission,
+    )
+
+elif plot_type == "by_key_phase_per_timestep_entropy":
+    fig = plot_grouped_per_timestep_entropy_heatmap(
+        routing_data, group_by="key_phase",
+        env_image=env_image, env_mission=env_mission,
+    )
+
 # ── 5. Preview & optionally save ──────────────────────────────────────────────
 out_dir = pathlib.Path("plots") / task_id / f"trial_{trial}"
 
@@ -227,11 +299,21 @@ filename_map = {
     "by_door_location":              "routing_heatmap_by_door_location.png",
     "by_door_and_box_row":           "routing_heatmap_by_door_and_box_row.png",
     "by_carrying_phase":             "routing_heatmap_by_carrying_phase.png",
+    "by_door_unlocked_phase":        "routing_heatmap_by_door_unlocked_phase.png",
     "by_agent_and_target_quadrant":  "routing_heatmap_by_agent_and_target_quadrant.png",
     "action_frequency":              "logit_action_frequency.png",
     "action_frequency_carrying":     "logit_action_frequency_carrying.png",
     "across_episode_entropy_heatmap": "logit_across_episode_entropy_heatmap.png",
     "per_timestep_entropy_heatmap":   "logit_per_timestep_entropy_heatmap.png",
+    "by_door_location_across_episode_entropy":     "entropy_across_episode_by_door_location.png",
+    "by_door_location_per_timestep_entropy":       "entropy_per_timestep_by_door_location.png",
+    "by_door_and_box_row_across_episode_entropy":      "entropy_across_episode_by_door_and_box_row.png",
+    "by_door_and_box_row_per_timestep_entropy":        "entropy_per_timestep_by_door_and_box_row.png",
+    "by_door_unlocked_phase_across_episode_entropy":   "entropy_across_episode_by_door_unlocked_phase.png",
+    "by_door_unlocked_phase_per_timestep_entropy":     "entropy_per_timestep_by_door_unlocked_phase.png",
+    "by_key_phase":                              "routing_heatmap_by_key_phase.png",
+    "by_key_phase_across_episode_entropy":       "entropy_across_episode_by_key_phase.png",
+    "by_key_phase_per_timestep_entropy":         "entropy_per_timestep_by_key_phase.png",
 }
 
 out_path = out_dir / filename_map[plot_type]
