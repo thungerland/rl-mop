@@ -91,6 +91,7 @@ class EvalVectorEnv:
         self.envs = []
         self.obs_list = []
         self.missions = []
+        self.door_positions = []  # (x, y) of door per env, None if no door
 
         # Language encoding (same as training)
         self.tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
@@ -108,6 +109,8 @@ class EvalVectorEnv:
 
         # Metrics
         self.episode_steps = np.zeros(num_envs, dtype=int)
+        self.t_unlocked = [None] * num_envs  # first t_step when door_unlocked=1, per env
+        self.t_pick = [None] * num_envs  # first t_step when carrying=1, per env
         self.total_episodes = 0
         self.successful_episodes = 0
         self.sum_path_ratio = 0.0
@@ -129,8 +132,10 @@ class EvalVectorEnv:
             obs = obs.copy()
             obs.pop('mission', None)
             obs = self._add_carrying_flag(env, obs)
-
             self.envs.append(env)
+            self.door_positions.append(self._get_door_position(env))
+            obs = self._add_door_unlocked_flag(i, obs)
+
             self.obs_list.append(obs)
             self.missions.append(mission)
 
@@ -146,6 +151,28 @@ class EvalVectorEnv:
     def _add_carrying_flag(self, env, obs: dict) -> dict:
         base = getattr(env, "unwrapped", env)
         obs["carrying_flag"] = 0 if getattr(base, "carrying", None) is None else 1
+        return obs
+
+    def _get_door_position(self, env) -> tuple | None:
+        """Find the (x, y) of the first door in the grid. Returns None if no door."""
+        base = getattr(env, "unwrapped", env)
+        for j in range(base.grid.height):
+            for i in range(base.grid.width):
+                cell = base.grid.get(i, j)
+                if cell is not None and cell.type == 'door':
+                    return (i, j)
+        return None
+
+    def _add_door_unlocked_flag(self, env_idx: int, obs: dict) -> dict:
+        """Add door_unlocked_flag=1 if the door at self.door_positions[env_idx] is no longer locked."""
+        door_pos = self.door_positions[env_idx]
+        if door_pos is not None:
+            base = getattr(self.envs[env_idx], "unwrapped", self.envs[env_idx])
+            cell = base.grid.get(*door_pos)
+            unlocked = 0 if (cell is not None and getattr(cell, 'is_locked', False)) else 1
+        else:
+            unlocked = 0
+        obs["door_unlocked_flag"] = unlocked
         return obs
 
     def _encode_mission(self, mission: str) -> torch.Tensor:
@@ -290,6 +317,8 @@ class EvalVectorEnv:
             obs = obs.copy()
             obs.pop('mission', None)
             obs = self._add_carrying_flag(env, obs)
+            self.door_positions[i] = self._get_door_position(env)
+            obs = self._add_door_unlocked_flag(i, obs)
 
             try:
                 expert_steps = self._compute_optimal_steps(env)
@@ -302,6 +331,8 @@ class EvalVectorEnv:
             self.missions[i] = mission
             self.lang_embs[i] = self._encode_mission(mission)
             self.episode_steps[i] = 0
+            self.t_unlocked[i] = None
+            self.t_pick[i] = None
             self.expert_steps[i] = expert_steps
             return obs
 
@@ -338,6 +369,20 @@ class EvalVectorEnv:
             obs = obs.copy()
             obs.pop('mission', None)
             obs = self._add_carrying_flag(env, obs)
+            obs = self._add_door_unlocked_flag(i, obs)
+
+            if self.t_unlocked[i] is None:
+                door_pos = self.door_positions[i]
+                if door_pos is not None:
+                    base = getattr(env, "unwrapped", env)
+                    cell = base.grid.get(*door_pos)
+                    if cell is None or not getattr(cell, 'is_locked', False):
+                        self.t_unlocked[i] = self.episode_steps[i]
+
+            if self.t_pick[i] is None:
+                carrying = int(obs.get('carrying_flag', 0))
+                if carrying == 1:
+                    self.t_pick[i] = self.episode_steps[i]
 
             episode_over = term or trunc
 
@@ -475,8 +520,31 @@ def evaluate(policy, vec_env, num_episodes, device):
                     )
                     sample_lpc += (weights * sizes_squared).sum().item()
 
-                # Include environment context, carrying state, and action logits
+                # Include environment context, carrying state, door unlock state, and action logits
                 carrying = int(vec_env.obs_list[i].get('carrying_flag', 0))
+                door_unlocked = int(vec_env.obs_list[i].get('door_unlocked_flag', 0))
+                t_step = int(vec_env.episode_steps[i])
+                t_unlocked = vec_env.t_unlocked[i]
+                t_pick = vec_env.t_pick[i]
+
+                pos_x, pos_y = pos
+                door_pos = vec_env.door_positions[i]
+                dist_to_door = (
+                    float(np.sqrt((pos_x - door_pos[0])**2 + (pos_y - door_pos[1])**2))
+                    if door_pos is not None else None
+                )
+                target_pos = env_contexts[i].get('target_pos')
+                dist_to_target = (
+                    float(np.sqrt((pos_x - target_pos[0])**2 + (pos_y - target_pos[1])**2))
+                    if target_pos is not None else None
+                )
+                keys = env_contexts[i].get('keys', [])
+                key_pos = (keys[0][0], keys[0][1]) if keys else None
+                dist_to_key = (
+                    float(np.sqrt((pos_x - key_pos[0])**2 + (pos_y - key_pos[1])**2))
+                    if key_pos is not None else None
+                )
+
                 logits_np = logits[i].cpu().numpy().astype(np.float64)
                 logits_shifted = logits_np - logits_np.max()
                 exp_l = np.exp(logits_shifted)
@@ -487,8 +555,15 @@ def evaluate(policy, vec_env, num_episodes, device):
                     'lpc': sample_lpc,
                     'env_context': env_contexts[i],
                     'carrying': carrying,
+                    'door_unlocked': door_unlocked,
                     'action_logits': logits_np,
                     'entropy': float(-np.sum(probs * np.log(probs + 1e-9))),
+                    't_step': t_step,
+                    't_unlocked': t_unlocked,
+                    't_pick': t_pick,
+                    'dist_to_door': dist_to_door,
+                    'dist_to_key': dist_to_key,
+                    'dist_to_target': dist_to_target,
                 })
 
             # Sample actions (greedy for eval)
