@@ -38,8 +38,15 @@ def build_routing_data_tuples(cache: dict) -> list:
             'lpc': r['lpc'],
             'env_context': episodes[r['episode']] if episodes is not None else r.get('env_context', {}),
             'carrying': r.get('carrying', 0),
+            'door_unlocked': r.get('door_unlocked', 0),
             'action_logits': np.array(r['action_logits'], dtype=np.float32) if 'action_logits' in r else None,
             'entropy': r['entropy'] if 'entropy' in r else None,
+            't_step': r.get('t_step'),
+            't_unlocked': r.get('t_unlocked'),
+            't_pick': r.get('t_pick'),
+            'dist_to_door': r.get('dist_to_door'),
+            'dist_to_key': r.get('dist_to_key'),
+            'dist_to_target': r.get('dist_to_target'),
         }
         for r in raw
     ]
@@ -479,6 +486,8 @@ def group_routing_data(routing_data: list, group_by: str) -> dict[tuple, list]:
 
         if group_by == 'carrying_phase':
             key = (sample.get('carrying', 0),)
+        elif group_by == 'door_unlocked_phase':
+            key = (sample.get('door_unlocked', 0),)
         elif group_by == 'door_location':
             doors = env_context.get('doors')
             if not doors:
@@ -502,6 +511,27 @@ def group_routing_data(routing_data: list, group_by: str) -> dict[tuple, list]:
             aq = pos_to_quadrant(agent_pos[0], agent_pos[1], room_bounds)
             tq = pos_to_quadrant(target_pos[0], target_pos[1], room_bounds)
             key = (aq, tq)
+        elif group_by == 'unlock_phase':
+            t_step = sample.get('t_step')
+            t_unlocked = sample.get('t_unlocked')
+            if t_step is None:
+                continue
+            if t_unlocked is None or t_step < t_unlocked:
+                key = (0,)   # pre-unlock
+            else:
+                key = (1,)   # post-unlock
+        elif group_by == 'key_phase':
+            t_step = sample.get('t_step')
+            t_pick = sample.get('t_pick')
+            t_unlocked = sample.get('t_unlocked')
+            if t_step is None:
+                continue
+            if t_pick is None or t_step < t_pick:
+                key = (0,)   # pre-key
+            elif t_unlocked is None or t_step < t_unlocked:
+                key = (1,)   # post-key, pre-unlock
+            else:
+                key = (2,)   # post-unlock
         else:
             key = env_context.get(group_by)
             if key is None:
@@ -646,13 +676,56 @@ def carrying_phase_labels_for_groups(sorted_keys: list) -> dict:
     return {k: labels.get(k, f"Phase {k[0]}") for k in sorted_keys}
 
 
+def door_unlocked_phase_labels_for_groups(sorted_keys: list) -> dict:
+    """Map door-unlocked-phase group keys to human-readable labels.
+
+    Args:
+        sorted_keys: List of group keys, each a 1-tuple (door_unlocked,)
+                     where door_unlocked is 0 (door still locked) or 1 (door unlocked).
+
+    Returns:
+        Dict mapping group_key -> label string
+    """
+    labels = {(0,): "Door locked", (1,): "Door unlocked"}
+    return {k: labels.get(k, f"Phase {k[0]}") for k in sorted_keys}
+
+
+def unlock_phase_labels_for_groups(sorted_keys: list) -> dict:
+    """Map unlock-phase group keys to human-readable labels.
+
+    Args:
+        sorted_keys: List of group keys, each a 1-tuple (phase,)
+                     where 0 = pre-unlock (t_step < t_unlocked or never unlocked)
+                     and 1 = post-unlock (t_step >= t_unlocked).
+
+    Returns:
+        Dict mapping group_key -> label string
+    """
+    labels = {(0,): "Pre-unlock", (1,): "Post-unlock"}
+    return {k: labels.get(k, f"Phase {k[0]}") for k in sorted_keys}
+
+
+def key_phase_labels_for_groups(sorted_keys: list) -> dict:
+    """Map key-phase group keys to human-readable labels.
+
+    Args:
+        sorted_keys: List of group keys, each a 1-tuple (phase,)
+                     where 0 = pre-key, 1 = post-key/pre-unlock, 2 = post-unlock.
+
+    Returns:
+        Dict mapping group_key -> label string
+    """
+    labels = {(0,): "Pre-key", (1,): "Post-key (pre-unlock)", (2,): "Post-unlock"}
+    return {k: labels.get(k, f"Phase {k[0]}") for k in sorted_keys}
+
+
 def plot_grouped_routing(
     routing_data: list,
     group_by: str,
     env_image: np.ndarray = None,
     env_mission: str = "",
     room_env_images: dict = None,
-    max_groups: int = 9,
+    max_groups: int = 25,
 ) -> plt.Figure:
     """
     Create a multi-row figure with one row of heatmaps per group.
@@ -739,6 +812,10 @@ def plot_grouped_routing(
         group_labels = door_and_box_row_labels_for_groups(sorted_keys)
     elif group_by == 'carrying_phase':
         group_labels = carrying_phase_labels_for_groups(sorted_keys)
+    elif group_by == 'door_unlocked_phase':
+        group_labels = door_unlocked_phase_labels_for_groups(sorted_keys)
+    elif group_by == 'key_phase':
+        group_labels = key_phase_labels_for_groups(sorted_keys)
     elif group_by == 'agent_and_target_quadrant':
         group_labels = agent_and_target_quadrant_labels_for_groups(sorted_keys)
     else:
@@ -1045,3 +1122,219 @@ def plot_per_timestep_entropy_heatmap(
     fig.tight_layout()
     return fig
 
+
+def _compute_group_across_episode_entropy(group_data: list) -> dict:
+    """Compute avg_entropy_by_pos for across-episode entropy (H of mean action distribution)."""
+    valid = [s for s in group_data if s.get('action_logits') is not None]
+    position_probs = defaultdict(list)
+    for s in valid:
+        logits = s['action_logits'].astype(np.float64)
+        logits_shifted = logits - logits.max()
+        exp_logits = np.exp(logits_shifted)
+        p = exp_logits / exp_logits.sum()
+        position_probs[s['position']].append(p)
+    avg_entropy_by_pos = {}
+    for pos, probs_list in position_probs.items():
+        mean_p = np.mean(probs_list, axis=0)
+        avg_entropy_by_pos[pos] = -np.sum(mean_p * np.log(mean_p + 1e-9))
+    return avg_entropy_by_pos
+
+
+def _compute_group_per_timestep_entropy(group_data: list) -> dict:
+    """Compute avg_entropy_by_pos for per-timestep entropy (mean of H(p_t))."""
+    valid = [s for s in group_data if s.get('entropy') is not None]
+    position_entropies = defaultdict(list)
+    for s in valid:
+        position_entropies[s['position']].append(s['entropy'])
+    return {pos: np.mean(vals) for pos, vals in position_entropies.items()}
+
+
+def _plot_grouped_entropy_heatmap(
+    routing_data: list,
+    compute_entropy_fn,
+    title: str,
+    group_by: str,
+    env_image: np.ndarray = None,
+    env_mission: str = "",
+    room_env_images: dict = None,
+    max_groups: int = 25,
+) -> plt.Figure:
+    """Shared implementation for grouped entropy heatmaps (across-episode and per-timestep)."""
+    groups = group_routing_data(routing_data, group_by)
+
+    if not groups:
+        fig, ax = plt.subplots(1, 1, figsize=(6, 4))
+        ax.text(0.5, 0.5, f"No data for grouping by '{group_by}'",
+                ha='center', va='center', fontsize=14)
+        ax.axis('off')
+        return fig
+
+    sorted_keys = sorted(groups.keys())[:max_groups]
+    num_groups = len(sorted_keys)
+
+    # Global grid bounds so all rows share the same coordinate system
+    all_positions = [s['position'] for s in routing_data]
+    global_grid_info = compute_grid_bounds(all_positions)
+    grid_width = global_grid_info['grid_width']
+    grid_height = global_grid_info['grid_height']
+    x_min = global_grid_info['x_min']
+    y_min = global_grid_info['y_min']
+
+    # Group labels
+    if group_by == 'agent_start_room':
+        first_ctx = routing_data[0]['env_context']
+        group_labels = room_labels_for_groups(sorted_keys, first_ctx.get('room_grid_shape'))
+    elif group_by == 'door_location':
+        group_labels = door_location_labels_for_groups(sorted_keys)
+    elif group_by == 'door_and_box_row':
+        group_labels = door_and_box_row_labels_for_groups(sorted_keys)
+    elif group_by == 'carrying_phase':
+        group_labels = carrying_phase_labels_for_groups(sorted_keys)
+    elif group_by == 'door_unlocked_phase':
+        group_labels = door_unlocked_phase_labels_for_groups(sorted_keys)
+    elif group_by == 'key_phase':
+        group_labels = key_phase_labels_for_groups(sorted_keys)
+    elif group_by == 'agent_and_target_quadrant':
+        group_labels = agent_and_target_quadrant_labels_for_groups(sorted_keys)
+    else:
+        group_labels = {k: f"{group_by}={k}" for k in sorted_keys}
+
+    has_env_image = env_image is not None
+    num_main_cols = (1 if has_env_image else 0) + 1  # [env_image?] + [entropy heatmap]
+    num_cols = num_main_cols + 1  # +1 narrow colorbar column
+
+    col_width = 4.5
+    row_height = 4.5
+    fig = plt.figure(figsize=(col_width * num_main_cols, row_height * num_groups))
+
+    width_ratios = [1] * num_main_cols + [0.05]
+    gs = gridspec.GridSpec(
+        num_groups, num_cols,
+        height_ratios=[1] * num_groups,
+        width_ratios=width_ratios,
+        hspace=0.35, wspace=0.35,
+    )
+
+    cmap = plt.cm.plasma.copy()
+    cmap.set_bad(color=UNVISITED_COLOR)
+
+    entropy_im = None
+
+    for row_idx, group_key in enumerate(sorted_keys):
+        group_data = groups[group_key]
+        avg_entropy_by_pos = compute_entropy_fn(group_data)
+
+        col_idx = 0
+        label = group_labels[group_key]
+
+        if has_env_image:
+            if room_env_images and group_key in room_env_images:
+                row_image, row_mission = room_env_images[group_key]
+            else:
+                row_image, row_mission = env_image, env_mission
+            ax = fig.add_subplot(gs[row_idx, col_idx])
+            ax.imshow(row_image)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            ax.set_ylabel(f"{label}\n({len(group_data)} samples)", fontsize=9)
+            ax.set_xlabel(row_mission, fontsize=8)
+            if row_idx == 0:
+                ax.set_title("Environment Layout")
+            col_idx += 1
+
+        entropy_grid = np.full((grid_height, grid_width), np.nan)
+        for pos, val in avg_entropy_by_pos.items():
+            gx, gy = pos[0] - x_min, pos[1] - y_min
+            entropy_grid[gy, gx] = val
+
+        ax = fig.add_subplot(gs[row_idx, col_idx])
+        entropy_im = ax.imshow(entropy_grid, origin='upper', cmap=cmap)
+        if not has_env_image:
+            ax.set_ylabel(f"{label}\n({len(group_data)} samples)", fontsize=9)
+        ax.set_xlabel("X")
+        ax.set_xticks(np.arange(-0.5, grid_width, 1), minor=True)
+        ax.set_yticks(np.arange(-0.5, grid_height, 1), minor=True)
+        ax.grid(which='minor', color='white', linestyle='-', linewidth=0.5)
+        ax.tick_params(which='minor', size=0)
+        if row_idx == 0:
+            ax.set_title(title)
+
+    if entropy_im is not None:
+        cbar_ax = fig.add_subplot(gs[:, num_main_cols])
+        fig.colorbar(entropy_im, cax=cbar_ax).set_label('Entropy (nats)')
+
+    return fig
+
+
+def plot_grouped_across_episode_entropy_heatmap(
+    routing_data: list,
+    group_by: str,
+    env_image: np.ndarray = None,
+    env_mission: str = "",
+    room_env_images: dict = None,
+    max_groups: int = 25,
+) -> plt.Figure:
+    """
+    Grouped across-episode entropy heatmap: one row per group.
+
+    Each row shows H(-sum(p̄ * log(p̄))) where p̄ = mean softmax(logits) per position,
+    computed independently within each group.
+
+    Args:
+        routing_data: List of sample dicts
+        group_by: Field to group by (e.g. 'door_location', 'door_and_box_row')
+        env_image: Optional fallback environment render
+        env_mission: Optional fallback mission string
+        room_env_images: Optional dict mapping group_key -> (image, mission)
+        max_groups: Maximum number of groups to display
+
+    Returns:
+        matplotlib Figure object
+    """
+    return _plot_grouped_entropy_heatmap(
+        routing_data,
+        compute_entropy_fn=_compute_group_across_episode_entropy,
+        title="Across-Episode Action Entropy",
+        group_by=group_by,
+        env_image=env_image,
+        env_mission=env_mission,
+        room_env_images=room_env_images,
+        max_groups=max_groups,
+    )
+
+
+def plot_grouped_per_timestep_entropy_heatmap(
+    routing_data: list,
+    group_by: str,
+    env_image: np.ndarray = None,
+    env_mission: str = "",
+    room_env_images: dict = None,
+    max_groups: int = 25,
+) -> plt.Figure:
+    """
+    Grouped per-timestep entropy heatmap: one row per group.
+
+    Each row shows mean(H(p_t)) per position, where H(p_t) is the pre-computed
+    per-timestep entropy, computed independently within each group.
+
+    Args:
+        routing_data: List of sample dicts with 'entropy' key
+        group_by: Field to group by (e.g. 'door_location', 'door_and_box_row')
+        env_image: Optional fallback environment render
+        env_mission: Optional fallback mission string
+        room_env_images: Optional dict mapping group_key -> (image, mission)
+        max_groups: Maximum number of groups to display
+
+    Returns:
+        matplotlib Figure object
+    """
+    return _plot_grouped_entropy_heatmap(
+        routing_data,
+        compute_entropy_fn=_compute_group_per_timestep_entropy,
+        title="Per-Timestep Action Entropy",
+        group_by=group_by,
+        env_image=env_image,
+        env_mission=env_mission,
+        room_env_images=room_env_images,
+        max_groups=max_groups,
+    )
