@@ -557,6 +557,7 @@ def evaluate(policy, vec_env, num_episodes, device):
                     'carrying': carrying,
                     'door_unlocked': door_unlocked,
                     'action_logits': logits_np,
+                    'action': int(np.argmax(logits_np)),
                     'entropy': float(-np.sum(probs * np.log(probs + 1e-9))),
                     't_step': t_step,
                     't_unlocked': t_unlocked,
