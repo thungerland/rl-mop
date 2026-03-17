@@ -2,21 +2,15 @@
 stats.py — Statistical analyses on routing cache data.
 
 Always printed:
-  - Per-timestep Pearson r (entropy vs LPC) across all timesteps
-  - Spatial Pearson r (per-cell across-episode entropy vs per-cell mean LPC)
+  - Spatial Pearson r (per-cell empirical H(A|S) vs per-cell mean LPC)
   - Distance correlations (requires new-format cache with t_step/t_unlocked/distances):
       2-phase (pre/post unlock):
-        entropy vs dist_to_door   [pre-unlock]
-        lpc     vs dist_to_door   [pre-unlock]
-        entropy vs dist_to_target [post-unlock]
-        lpc     vs dist_to_target [post-unlock]
+        lpc/entropy/kl vs dist_to_door   [pre-unlock]
+        lpc/entropy/kl vs dist_to_target [post-unlock]
       3-phase (pre-key / post-key pre-unlock / post-unlock, requires t_pick):
-        entropy vs dist_to_key    [pre-key]
-        lpc     vs dist_to_key    [pre-key]
-        entropy vs dist_to_door   [post-key/pre-unlock]
-        lpc     vs dist_to_door   [post-key/pre-unlock]
-        entropy vs dist_to_target [post-unlock]
-        lpc     vs dist_to_target [post-unlock]
+        lpc/entropy/kl vs dist_to_key    [pre-key]
+        lpc/entropy/kl vs dist_to_door   [post-key/pre-unlock]
+        lpc/entropy/kl vs dist_to_target [post-unlock]
 
 Optionally printed (pass group_by as third argument):
   - Grouped spatial correlation: spatial Pearson r computed independently per group
@@ -50,32 +44,6 @@ import numpy as np
 from scipy import stats
 
 
-def per_timestep_entropy_lpc_correlation(routing_data: list) -> dict:
-    """
-    Pearson correlation between action entropy and LPC across all timesteps.
-
-    Flattens all (entropy, lpc) pairs across every timestep of every episode.
-    Filters records where either field is None.
-
-    Args:
-        routing_data: List of dicts with keys 'entropy' and 'lpc'.
-
-    Returns:
-        dict with keys 'r' (Pearson r), 'p' (two-sided p-value), 'n' (sample count).
-    """
-    pairs = [
-        (s['entropy'], s['lpc'])
-        for s in routing_data
-        if s.get('entropy') is not None and s.get('lpc') is not None
-    ]
-    if len(pairs) < 3:
-        return {'r': float('nan'), 'p': float('nan'), 'n': len(pairs)}
-
-    entropy_vec, lpc_vec = zip(*pairs)
-    r, p = stats.pearsonr(entropy_vec, lpc_vec)
-    return {'r': float(r), 'p': float(p), 'n': len(pairs)}
-
-
 def _filter_by_phase(routing_data, phase):
     """Yield samples matching the given phase.
 
@@ -107,30 +75,6 @@ def _filter_by_phase(routing_data, phase):
                     yield s
 
 
-def per_timestep_entropy_dist_correlation(routing_data: list, dist_field: str, phase: str = None) -> dict:
-    """
-    Pearson correlation between action entropy and a distance field across timesteps.
-
-    Args:
-        routing_data: List of dicts with 'entropy' and the specified dist_field.
-        dist_field: 'dist_to_door' or 'dist_to_target'.
-        phase: 'pre_unlock', 'post_unlock', or None (all timesteps).
-
-    Returns:
-        dict with keys 'r', 'p', 'n'.
-    """
-    pairs = [
-        (s['entropy'], s[dist_field])
-        for s in _filter_by_phase(routing_data, phase)
-        if s.get('entropy') is not None and s.get(dist_field) is not None
-    ]
-    if len(pairs) < 3:
-        return {'r': float('nan'), 'p': float('nan'), 'n': len(pairs)}
-    e, d = zip(*pairs)
-    r, p = stats.pearsonr(e, d)
-    return {'r': float(r), 'p': float(p), 'n': len(pairs)}
-
-
 def per_timestep_lpc_dist_correlation(routing_data: list, dist_field: str, phase: str = None) -> dict:
     """
     Pearson correlation between LPC and a distance field across timesteps.
@@ -155,48 +99,106 @@ def per_timestep_lpc_dist_correlation(routing_data: list, dist_field: str, phase
     return {'r': float(r), 'p': float(p), 'n': len(pairs)}
 
 
-def spatial_entropy_lpc_correlation(routing_data: list) -> dict:
+def per_timestep_entropy_dist_correlation(
+    routing_data: list,
+    H_s: dict,
+    dist_field: str,
+    phase: str = None,
+) -> dict:
     """
-    Pearson correlation between per-cell mean LPC and per-cell across-episode entropy.
+    Pearson r between per-position empirical H(A|S=s) and a distance field per timestep.
 
-    Per-cell entropy: H(mean softmax distribution across all visits) = H(mean_p).
-    Per-cell LPC: mean LPC across all visits.
-    Correlates these two scalar values over all visited grid cells.
+    For each timestep, looks up H_s[position] and pairs with dist_field at that timestep.
+    Positions absent from H_s (fewer than min_visits) are skipped automatically.
 
     Args:
-        routing_data: List of dicts with keys 'position', 'action_logits', 'lpc'.
+        routing_data: List of sample dicts.
+        H_s: dict mapping position -> H(A|S=s) in bits (from compute_empirical_entropy, masked).
+        dist_field: 'dist_to_door', 'dist_to_key', or 'dist_to_target'.
+        phase: 'pre_unlock', 'post_unlock', 'pre_key', 'post_key_pre_unlock', or None.
+
+    Returns:
+        dict with keys 'r', 'p', 'n'.
+    """
+    pairs = [
+        (H_s[s['position']], s[dist_field])
+        for s in _filter_by_phase(routing_data, phase)
+        if s['position'] in H_s and s.get(dist_field) is not None
+    ]
+    if len(pairs) < 3:
+        return {'r': float('nan'), 'p': float('nan'), 'n': len(pairs)}
+    h, d = zip(*pairs)
+    r, p = stats.pearsonr(h, d)
+    return {'r': float(r), 'p': float(p), 'n': len(pairs)}
+
+
+def per_timestep_kl_dist_correlation(
+    routing_data: list,
+    KL_s: dict,
+    dist_field: str,
+    phase: str = None,
+) -> dict:
+    """
+    Pearson r between per-position KL(pi_hat(.|s) || P(a)) and a distance field per timestep.
+
+    For each timestep, looks up KL_s[position] and pairs with dist_field at that timestep.
+    Positions absent from KL_s (fewer than min_visits) are skipped automatically.
+
+    Args:
+        routing_data: List of sample dicts.
+        KL_s: dict mapping position -> KL divergence in bits (from compute_empirical_entropy, masked).
+        dist_field: 'dist_to_door', 'dist_to_key', or 'dist_to_target'.
+        phase: 'pre_unlock', 'post_unlock', 'pre_key', 'post_key_pre_unlock', or None.
+
+    Returns:
+        dict with keys 'r', 'p', 'n'.
+    """
+    pairs = [
+        (KL_s[s['position']], s[dist_field])
+        for s in _filter_by_phase(routing_data, phase)
+        if s['position'] in KL_s and s.get(dist_field) is not None
+    ]
+    if len(pairs) < 3:
+        return {'r': float('nan'), 'p': float('nan'), 'n': len(pairs)}
+    kl, d = zip(*pairs)
+    r, p = stats.pearsonr(kl, d)
+    return {'r': float(r), 'p': float(p), 'n': len(pairs)}
+
+
+def spatial_entropy_lpc_correlation(routing_data: list, min_visits: int = 5) -> dict:
+    """
+    Pearson correlation between per-cell mean LPC and per-cell empirical H(A|S=s).
+
+    Per-cell entropy: H(A|S=s) in bits from Dirichlet-smoothed empirical action counts.
+    Per-cell LPC: mean LPC across all visits.
+    Only includes positions with at least min_visits visits.
+
+    Args:
+        routing_data: List of dicts with keys 'position', 'action', 'lpc'.
+        min_visits: Minimum visits to include a position.
 
     Returns:
         dict with keys 'r', 'p', 'n_cells'.
     """
-    valid = [s for s in routing_data if s.get('action_logits') is not None and s.get('lpc') is not None]
-    if not valid:
-        return {'r': float('nan'), 'p': float('nan'), 'n_cells': 0}
+    from plotting_utils import compute_empirical_entropy
+    result = compute_empirical_entropy(routing_data, min_visits=min_visits)
+    H_s = result['H_s']
+    include_mask = result['include_mask']
 
-    position_probs = defaultdict(list)
     position_lpc = defaultdict(list)
-
-    for s in valid:
-        pos = s['position']
-        logits = np.array(s['action_logits'], dtype=np.float64)
-        logits_shifted = logits - logits.max()
-        exp_l = np.exp(logits_shifted)
-        p = exp_l / exp_l.sum()
-        position_probs[pos].append(p)
-        position_lpc[pos].append(s['lpc'])
-
-    entropy_by_pos = {}
-    for pos, probs_list in position_probs.items():
-        mean_p = np.mean(probs_list, axis=0)
-        entropy_by_pos[pos] = float(-np.sum(mean_p * np.log(mean_p + 1e-9)))
-
+    for s in routing_data:
+        if s.get('lpc') is not None:
+            position_lpc[s['position']].append(s['lpc'])
     lpc_by_pos = {pos: float(np.mean(vals)) for pos, vals in position_lpc.items()}
 
-    shared_positions = sorted(set(entropy_by_pos) & set(lpc_by_pos))
+    shared_positions = sorted(
+        pos for pos in set(H_s) & set(lpc_by_pos)
+        if include_mask.get(pos, False)
+    )
     if len(shared_positions) < 3:
         return {'r': float('nan'), 'p': float('nan'), 'n_cells': len(shared_positions)}
 
-    entropy_vec = [entropy_by_pos[pos] for pos in shared_positions]
+    entropy_vec = [H_s[pos] for pos in shared_positions]
     lpc_vec = [lpc_by_pos[pos] for pos in shared_positions]
 
     r, p = stats.pearsonr(entropy_vec, lpc_vec)
@@ -255,13 +257,8 @@ if __name__ == '__main__':
     print(f"Task: {task_id}  Trial: {trial}  Timesteps: {len(routing_data)}")
     print()
 
-    ts = per_timestep_entropy_lpc_correlation(routing_data)
-    print(f"Per-timestep correlation (entropy vs LPC)")
-    print(f"  r = {ts['r']:.4f}  p = {ts['p']:.4e}  n = {ts['n']}")
-    print()
-
     sp = spatial_entropy_lpc_correlation(routing_data)
-    print(f"Spatial correlation (across-episode entropy vs mean LPC per grid cell)")
+    print(f"Spatial correlation (empirical H(A|S) vs mean LPC per grid cell)")
     print(f"  r = {sp['r']:.4f}  p = {sp['p']:.4e}  n_cells = {sp['n_cells']}")
 
     if group_by is not None:
@@ -296,34 +293,38 @@ if __name__ == '__main__':
 
     has_new_fields = any(s.get('t_step') is not None for s in routing_data[:10])
     if has_new_fields:
+        from plotting_utils import compute_empirical_entropy
+        emp = compute_empirical_entropy(routing_data)
+        H_s_masked  = {pos: v for pos, v in emp['H_s'].items()  if emp['include_mask'][pos]}
+        KL_s_masked = {pos: v for pos, v in emp['KL_s'].items() if emp['include_mask'][pos]}
+
         print()
         print("Distance correlations [2-phase: pre/post unlock]")
-        for dist_field, phase, label in [
-            ('dist_to_door',   'pre_unlock',  'entropy vs dist_to_door   [pre-unlock ]'),
-            ('dist_to_door',   'pre_unlock',  'lpc     vs dist_to_door   [pre-unlock ]'),
-            ('dist_to_target', 'post_unlock', 'entropy vs dist_to_target [post-unlock]'),
-            ('dist_to_target', 'post_unlock', 'lpc     vs dist_to_target [post-unlock]'),
+        for dist_field, phase, label, fn, extra in [
+            ('dist_to_door',   'pre_unlock',  'lpc     vs dist_to_door   [pre-unlock ]', per_timestep_lpc_dist_correlation,     (routing_data,)),
+            ('dist_to_door',   'pre_unlock',  'entropy vs dist_to_door   [pre-unlock ]', per_timestep_entropy_dist_correlation,  (routing_data, H_s_masked)),
+            ('dist_to_door',   'pre_unlock',  'kl      vs dist_to_door   [pre-unlock ]', per_timestep_kl_dist_correlation,       (routing_data, KL_s_masked)),
+            ('dist_to_target', 'post_unlock', 'lpc     vs dist_to_target [post-unlock]', per_timestep_lpc_dist_correlation,     (routing_data,)),
+            ('dist_to_target', 'post_unlock', 'entropy vs dist_to_target [post-unlock]', per_timestep_entropy_dist_correlation,  (routing_data, H_s_masked)),
+            ('dist_to_target', 'post_unlock', 'kl      vs dist_to_target [post-unlock]', per_timestep_kl_dist_correlation,       (routing_data, KL_s_masked)),
         ]:
-            if label.startswith('entropy'):
-                res = per_timestep_entropy_dist_correlation(routing_data, dist_field, phase)
-            else:
-                res = per_timestep_lpc_dist_correlation(routing_data, dist_field, phase)
+            res = fn(*extra, dist_field, phase)
             print(f"  {label}  r={res['r']:+.4f}  p={res['p']:.4e}  n={res['n']}")
 
     has_t_pick = any(s.get('dist_to_key') is not None for s in routing_data[:10])
     if has_new_fields and has_t_pick:
         print()
         print("Distance correlations [3-phase: pre-key / post-key pre-unlock / post-unlock]")
-        for dist_field, phase, label in [
-            ('dist_to_key',    'pre_key',             'entropy vs dist_to_key    [pre-key            ]'),
-            ('dist_to_key',    'pre_key',             'lpc     vs dist_to_key    [pre-key            ]'),
-            ('dist_to_door',   'post_key_pre_unlock', 'entropy vs dist_to_door   [post-key/pre-unlock]'),
-            ('dist_to_door',   'post_key_pre_unlock', 'lpc     vs dist_to_door   [post-key/pre-unlock]'),
-            ('dist_to_target', 'post_unlock',         'entropy vs dist_to_target [post-unlock        ]'),
-            ('dist_to_target', 'post_unlock',         'lpc     vs dist_to_target [post-unlock        ]'),
+        for dist_field, phase, label, fn, extra in [
+            ('dist_to_key',    'pre_key',             'lpc     vs dist_to_key    [pre-key            ]', per_timestep_lpc_dist_correlation,     (routing_data,)),
+            ('dist_to_key',    'pre_key',             'entropy vs dist_to_key    [pre-key            ]', per_timestep_entropy_dist_correlation,  (routing_data, H_s_masked)),
+            ('dist_to_key',    'pre_key',             'kl      vs dist_to_key    [pre-key            ]', per_timestep_kl_dist_correlation,       (routing_data, KL_s_masked)),
+            ('dist_to_door',   'post_key_pre_unlock', 'lpc     vs dist_to_door   [post-key/pre-unlock]', per_timestep_lpc_dist_correlation,     (routing_data,)),
+            ('dist_to_door',   'post_key_pre_unlock', 'entropy vs dist_to_door   [post-key/pre-unlock]', per_timestep_entropy_dist_correlation,  (routing_data, H_s_masked)),
+            ('dist_to_door',   'post_key_pre_unlock', 'kl      vs dist_to_door   [post-key/pre-unlock]', per_timestep_kl_dist_correlation,       (routing_data, KL_s_masked)),
+            ('dist_to_target', 'post_unlock',         'lpc     vs dist_to_target [post-unlock        ]', per_timestep_lpc_dist_correlation,     (routing_data,)),
+            ('dist_to_target', 'post_unlock',         'entropy vs dist_to_target [post-unlock        ]', per_timestep_entropy_dist_correlation,  (routing_data, H_s_masked)),
+            ('dist_to_target', 'post_unlock',         'kl      vs dist_to_target [post-unlock        ]', per_timestep_kl_dist_correlation,       (routing_data, KL_s_masked)),
         ]:
-            if label.startswith('entropy'):
-                res = per_timestep_entropy_dist_correlation(routing_data, dist_field, phase)
-            else:
-                res = per_timestep_lpc_dist_correlation(routing_data, dist_field, phase)
+            res = fn(*extra, dist_field, phase)
             print(f"  {label}  r={res['r']:+.4f}  p={res['p']:.4e}  n={res['n']}")
