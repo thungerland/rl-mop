@@ -40,6 +40,11 @@ def build_routing_data_tuples(cache: dict) -> list:
             'carrying': r.get('carrying', 0),
             'door_unlocked': r.get('door_unlocked', 0),
             'action_logits': np.array(r['action_logits'], dtype=np.float32) if 'action_logits' in r else None,
+            'action': (
+                int(r['action']) if 'action' in r
+                else int(np.argmax(r['action_logits'])) if r.get('action_logits') is not None
+                else None
+            ),
             'entropy': r['entropy'] if 'entropy' in r else None,
             't_step': r.get('t_step'),
             't_unlocked': r.get('t_unlocked'),
@@ -50,6 +55,79 @@ def build_routing_data_tuples(cache: dict) -> list:
         }
         for r in raw
     ]
+
+
+def compute_empirical_entropy(
+    routing_data: list,
+    n_actions: int = 7,
+    alpha: float = 0.5,
+    min_visits: int = 5,
+) -> dict:
+    """
+    Compute empirical action entropy per grid position from actual actions taken.
+
+    Extracts (position, action) pairs, builds count tables, applies Dirichlet
+    smoothing (alpha=0.5, Jeffreys prior), then computes:
+      - pi_hat(a|s): smoothed empirical distribution
+      - H(A|S=s) in bits (log2)
+      - KL(pi_hat(.|s) || P(a)) in bits
+      - P(s): visitation frequency
+      - include_mask: positions with n_visits >= min_visits
+
+    Args:
+        routing_data: List of sample dicts with 'position' and 'action' keys.
+        n_actions: Number of discrete actions (7 for BabyAI).
+        alpha: Dirichlet smoothing concentration (Jeffreys prior = 0.5).
+        min_visits: Minimum visits to include a position in analysis.
+
+    Returns:
+        dict with keys: 'pi_hat', 'H_s', 'KL_s', 'P_s', 'include_mask', 'P_a'
+    """
+    valid = [s for s in routing_data if s.get('action') is not None]
+    if not valid:
+        return {
+            'pi_hat': {}, 'H_s': {}, 'KL_s': {},
+            'P_s': {}, 'include_mask': {}, 'P_a': np.ones(n_actions) / n_actions,
+        }
+
+    counts = defaultdict(lambda: np.zeros(n_actions, dtype=np.float64))
+    for s in valid:
+        counts[s['position']][s['action']] += 1
+
+    total_visits = sum(c.sum() for c in counts.values())
+
+    # Marginal action distribution (Dirichlet-smoothed)
+    global_counts = np.zeros(n_actions, dtype=np.float64)
+    for c in counts.values():
+        global_counts += c
+    P_a = (global_counts + alpha) / (global_counts.sum() + n_actions * alpha)
+
+    pi_hat, H_s, KL_s, P_s, include_mask = {}, {}, {}, {}, {}
+    for pos, c in counts.items():
+        n = c.sum()
+        smoothed = (c + alpha) / (n + n_actions * alpha)
+        pi_hat[pos] = smoothed
+        H_s[pos] = float(-np.sum(smoothed * np.log2(smoothed + 1e-12)))
+        KL_s[pos] = float(np.sum(smoothed * np.log2((smoothed + 1e-12) / (P_a + 1e-12))))
+        P_s[pos] = n / total_visits
+        include_mask[pos] = bool(n >= min_visits)
+
+    return {
+        'pi_hat': pi_hat,
+        'H_s': H_s,
+        'KL_s': KL_s,
+        'P_s': P_s,
+        'include_mask': include_mask,
+        'P_a': P_a,
+    }
+
+
+def compute_global_mutual_information(KL_s: dict, P_s: dict) -> float:
+    """
+    Compute I(S; A) = sum_s P(s) * KL(pi_hat(.|s) || P(a)) in bits.
+    """
+    shared = set(KL_s) & set(P_s)
+    return float(sum(P_s[s] * KL_s[s] for s in shared))
 
 
 def _make_expert_cmap(light_color, dark_color, name):
@@ -960,60 +1038,174 @@ def plot_action_frequency(routing_data: list, group_by: str = None) -> plt.Figur
     return fig
 
 
+def plot_cell_action_distribution(
+    routing_data: list,
+    phase: str = "post_unlock",
+    position_mode: str = "pre_door",
+    pos_filter: tuple = None,
+) -> plt.Figure:
+    """
+    Bar chart of empirical action distribution at a specific cell, filtered by phase.
+
+    Useful for diagnosing high-entropy cells (e.g. just before the door post-unlock).
+
+    Args:
+        routing_data: List of dicts with keys position, action, t_step, t_unlocked, env_context.
+        phase: "post_unlock" (t_step >= t_unlocked), "pre_unlock", or "all".
+        position_mode: "pre_door" to target (door_x-1, door_y); ignored if pos_filter is set.
+        pos_filter: Explicit (x, y) absolute position to filter to. Overrides position_mode.
+
+    Returns:
+        matplotlib Figure object.
+    """
+    # Phase filter
+    if phase == "post_unlock":
+        phase_data = [
+            s for s in routing_data
+            if s.get('t_unlocked') is not None and s.get('t_step', 0) >= s['t_unlocked']
+        ]
+    elif phase == "pre_unlock":
+        phase_data = [
+            s for s in routing_data
+            if s.get('t_unlocked') is None or s.get('t_step', 0) < s['t_unlocked']
+        ]
+    else:
+        phase_data = list(routing_data)
+
+    # Position filter
+    if pos_filter is not None:
+        cell_data = [s for s in phase_data if tuple(s['position']) == tuple(pos_filter)]
+        cell_label = str(pos_filter)
+    else:
+        # pre_door: position is (door_x - 1, door_y) per sample's own door location
+        cell_data = []
+        cell_positions = set()
+        for s in phase_data:
+            doors = (s.get('env_context') or {}).get('doors', [])
+            if not doors:
+                continue
+            door_x, door_y = doors[0][0], doors[0][1]
+            target = (door_x - 1, door_y)
+            if tuple(s['position']) == target:
+                cell_data.append(s)
+                cell_positions.add(target)
+        cell_label = ", ".join(str(p) for p in sorted(cell_positions)) if cell_positions else "pre-door"
+
+    if not cell_data:
+        fig, ax = plt.subplots(figsize=(9, 5))
+        ax.text(0.5, 0.5, f"No data at {cell_label} for phase='{phase}'",
+                ha='center', va='center', fontsize=13)
+        ax.axis('off')
+        return fig
+
+    def _get_action(s):
+        a = s.get('action')
+        if a is None and s.get('action_logits') is not None:
+            a = int(np.argmax(s['action_logits']))
+        return int(a) if a is not None else None
+
+    n_actions = len(ACTION_NAMES)
+    x = np.arange(n_actions)
+
+    # Split by y coordinate when in pre_door mode (one sub-bar per row)
+    if pos_filter is None:
+        y_vals = sorted({s['position'][1] for s in cell_data})
+    else:
+        y_vals = None
+
+    if y_vals is not None and len(y_vals) > 1:
+        # Grouped bars: one colour per y row
+        colors = ['#5b9bd5', '#ed7d31', '#70ad47', '#ffc000', '#7030a0']
+        n_groups = len(y_vals)
+        width = 0.8 / n_groups
+        fig, ax = plt.subplots(figsize=(max(9, 5 + n_groups), 5))
+        total_n = 0
+        for i, y_val in enumerate(y_vals):
+            group = [s for s in cell_data if s['position'][1] == y_val]
+            actions = [a for s in group for a in [_get_action(s)] if a is not None]
+            total_n += len(actions)
+            freqs = np.bincount(actions, minlength=n_actions) if actions else np.zeros(n_actions)
+            offset = (i - (n_groups - 1) / 2) * width
+            color = colors[i % len(colors)]
+            bars = ax.bar(x + offset, freqs, width, label=f"y={y_val}  (N={len(actions)})",
+                          color=color, alpha=0.85)
+            for bar, val in zip(bars, freqs):
+                if val > 0:
+                    ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
+                            str(int(val)), ha='center', va='bottom', fontsize=7)
+        ax.legend(title="Row (y)")
+        title_pos = cell_label
+        total_label = f"N={total_n}"
+    else:
+        # Single-bar fallback (pos_filter or only one y value)
+        actions = [a for s in cell_data for a in [_get_action(s)] if a is not None]
+        if not actions:
+            fig, ax = plt.subplots(figsize=(9, 5))
+            ax.text(0.5, 0.5, "No action data available", ha='center', va='center', fontsize=13)
+            ax.axis('off')
+            return fig
+        freqs = np.bincount(actions, minlength=n_actions)
+        fig, ax = plt.subplots(figsize=(9, 5))
+        bars = ax.bar(x, freqs, color='#5b9bd5', alpha=0.85)
+        for bar, val in zip(bars, freqs):
+            if val > 0:
+                ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
+                        str(int(val)), ha='center', va='bottom', fontsize=9)
+        title_pos = cell_label
+        total_label = f"N={len(actions)}"
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(ACTION_NAMES)
+    ax.set_xlabel("Action")
+    ax.set_ylabel("Count")
+    ax.set_title(f"Action Distribution at {title_pos} — {phase} phase  ({total_label})")
+    fig.tight_layout()
+    return fig
+
+
 def plot_across_episode_entropy_heatmap(
     routing_data: list,
     env_image: np.ndarray = None,
     env_mission: str = "",
+    min_visits: int = 5,
 ) -> plt.Figure:
     """
-    Across-episode action entropy heatmap per grid cell.
+    Empirical action entropy heatmap: H(A|S=s) in bits per grid cell.
 
-    H = -sum(p̄ * log(p̄ + 1e-9)) where p̄ = mean softmax(logits) across all visits to that position.
-    Averages action probabilities first, then computes entropy, so the result reflects
-    how spread the preferred actions are across episodes at each position.
-    Shows where the agent is most/least uncertain.
+    Uses Dirichlet-smoothed empirical action counts from the actions actually taken.
+    Positions with fewer than min_visits visits are masked (NaN / unvisited color).
 
     Args:
-        routing_data: List of dicts with keys position, layer_routing, lpc, env_context,
-                      carrying, action_logits
-        env_image: Optional environment render to show alongside
-        env_mission: Optional mission string
+        routing_data: List of dicts with 'position' and 'action' keys.
+        env_image: Optional environment render to show alongside.
+        env_mission: Optional mission string.
+        min_visits: Minimum number of visits to include a position.
 
     Returns:
         matplotlib Figure object
     """
-    valid = [s for s in routing_data if s.get('action_logits') is not None]
-    if not valid:
+    result = compute_empirical_entropy(routing_data, min_visits=min_visits)
+    H_s = result['H_s']
+    include_mask = result['include_mask']
+
+    if not H_s:
         fig, ax = plt.subplots(figsize=(6, 4))
-        ax.text(0.5, 0.5, "No action_logits in data", ha='center', va='center', fontsize=14)
+        ax.text(0.5, 0.5, "No action data in routing_data", ha='center', va='center', fontsize=14)
         ax.axis('off')
         return fig
 
-    # Accumulate softmax probabilities per position, then compute entropy of the mean
-    position_probs = defaultdict(list)
-    for s in valid:
-        logits = s['action_logits'].astype(np.float64)
-        logits_shifted = logits - logits.max()
-        exp_logits = np.exp(logits_shifted)
-        p = exp_logits / exp_logits.sum()
-        position_probs[s['position']].append(p)
-
-    avg_entropy_by_pos = {}
-    for pos, probs_list in position_probs.items():
-        mean_p = np.mean(probs_list, axis=0)
-        avg_entropy_by_pos[pos] = -np.sum(mean_p * np.log(mean_p + 1e-9))
-    positions = list(avg_entropy_by_pos.keys())
+    positions = list(H_s.keys())
     grid_info = compute_grid_bounds(positions)
-
     grid_width = grid_info['grid_width']
     grid_height = grid_info['grid_height']
     x_min = grid_info['x_min']
     y_min = grid_info['y_min']
 
     entropy_grid = np.full((grid_height, grid_width), np.nan)
-    for pos, val in avg_entropy_by_pos.items():
-        gx, gy = pos[0] - x_min, pos[1] - y_min
-        entropy_grid[gy, gx] = val
+    for pos, val in H_s.items():
+        if include_mask.get(pos, False):
+            gx, gy = pos[0] - x_min, pos[1] - y_min
+            entropy_grid[gy, gx] = val
 
     num_plots = 2 if env_image is not None else 1
     fig, axes = plt.subplots(1, num_plots, figsize=(5 * num_plots, 5))
@@ -1033,120 +1225,28 @@ def plot_across_episode_entropy_heatmap(
     cmap = plt.cm.plasma.copy()
     cmap.set_bad(color=UNVISITED_COLOR)
     im = axes[plot_idx].imshow(entropy_grid, origin='upper', cmap=cmap)
-    axes[plot_idx].set_title("Across-Episode Action Entropy")
+    axes[plot_idx].set_title(f"Empirical Action Entropy H(A|S) [bits]\n(min_visits={min_visits})")
     axes[plot_idx].set_xlabel("X")
     axes[plot_idx].set_ylabel("Y")
     axes[plot_idx].set_xticks(np.arange(-0.5, grid_width, 1), minor=True)
     axes[plot_idx].set_yticks(np.arange(-0.5, grid_height, 1), minor=True)
     axes[plot_idx].grid(which='minor', color='white', linestyle='-', linewidth=0.5)
     axes[plot_idx].tick_params(which='minor', size=0)
-    fig.colorbar(im, ax=axes[plot_idx], label='Entropy (nats)')
+    fig.colorbar(im, ax=axes[plot_idx], label='Entropy (bits)')
 
     fig.tight_layout()
     return fig
 
 
-def plot_per_timestep_entropy_heatmap(
-    routing_data: list,
-    env_image: np.ndarray = None,
-    env_mission: str = "",
-) -> plt.Figure:
-    """
-    Per-timestep action entropy heatmap per grid cell.
-
-    Uses pre-computed per-timestep entropy values (cached as 'entropy' key).
-    H(p_t) = -sum(p_t * log(p_t + 1e-9)) where p_t = softmax(logits) at timestep t.
-    Averages H(p_t) across all visits to each position — mean(H(p_t)).
-    Reflects average moment-to-moment action uncertainty at each location.
-
-    Args:
-        routing_data: List of dicts with keys position, entropy (pre-computed per timestep)
-        env_image: Optional environment render to show alongside
-        env_mission: Optional mission string
-
-    Returns:
-        matplotlib Figure object
-    """
-    valid = [s for s in routing_data if s.get('entropy') is not None]
-    if not valid:
-        fig, ax = plt.subplots(figsize=(6, 4))
-        ax.text(0.5, 0.5, "No entropy in data", ha='center', va='center', fontsize=14)
-        ax.axis('off')
-        return fig
-
-    position_entropies = defaultdict(list)
-    for s in valid:
-        position_entropies[s['position']].append(s['entropy'])
-
-    avg_entropy_by_pos = {pos: np.mean(vals) for pos, vals in position_entropies.items()}
-    positions = list(avg_entropy_by_pos.keys())
-    grid_info = compute_grid_bounds(positions)
-
-    grid_width = grid_info['grid_width']
-    grid_height = grid_info['grid_height']
-    x_min = grid_info['x_min']
-    y_min = grid_info['y_min']
-
-    entropy_grid = np.full((grid_height, grid_width), np.nan)
-    for pos, val in avg_entropy_by_pos.items():
-        gx, gy = pos[0] - x_min, pos[1] - y_min
-        entropy_grid[gy, gx] = val
-
-    num_plots = 2 if env_image is not None else 1
-    fig, axes = plt.subplots(1, num_plots, figsize=(5 * num_plots, 5))
-    if num_plots == 1:
-        axes = [axes]
-
-    plot_idx = 0
-    if env_image is not None:
-        axes[plot_idx].imshow(env_image)
-        axes[plot_idx].set_title("Environment Layout")
-        if env_mission:
-            axes[plot_idx].set_xlabel(env_mission, fontsize=9)
-        axes[plot_idx].set_xticks([])
-        axes[plot_idx].set_yticks([])
-        plot_idx += 1
-
-    cmap = plt.cm.plasma.copy()
-    cmap.set_bad(color=UNVISITED_COLOR)
-    im = axes[plot_idx].imshow(entropy_grid, origin='upper', cmap=cmap)
-    axes[plot_idx].set_title("Per-Timestep Action Entropy")
-    axes[plot_idx].set_xlabel("X")
-    axes[plot_idx].set_ylabel("Y")
-    axes[plot_idx].set_xticks(np.arange(-0.5, grid_width, 1), minor=True)
-    axes[plot_idx].set_yticks(np.arange(-0.5, grid_height, 1), minor=True)
-    axes[plot_idx].grid(which='minor', color='white', linestyle='-', linewidth=0.5)
-    axes[plot_idx].tick_params(which='minor', size=0)
-    fig.colorbar(im, ax=axes[plot_idx], label='Entropy (nats)')
-
-    fig.tight_layout()
-    return fig
-
-
-def _compute_group_across_episode_entropy(group_data: list) -> dict:
-    """Compute avg_entropy_by_pos for across-episode entropy (H of mean action distribution)."""
-    valid = [s for s in group_data if s.get('action_logits') is not None]
-    position_probs = defaultdict(list)
-    for s in valid:
-        logits = s['action_logits'].astype(np.float64)
-        logits_shifted = logits - logits.max()
-        exp_logits = np.exp(logits_shifted)
-        p = exp_logits / exp_logits.sum()
-        position_probs[s['position']].append(p)
-    avg_entropy_by_pos = {}
-    for pos, probs_list in position_probs.items():
-        mean_p = np.mean(probs_list, axis=0)
-        avg_entropy_by_pos[pos] = -np.sum(mean_p * np.log(mean_p + 1e-9))
-    return avg_entropy_by_pos
-
-
-def _compute_group_per_timestep_entropy(group_data: list) -> dict:
-    """Compute avg_entropy_by_pos for per-timestep entropy (mean of H(p_t))."""
-    valid = [s for s in group_data if s.get('entropy') is not None]
-    position_entropies = defaultdict(list)
-    for s in valid:
-        position_entropies[s['position']].append(s['entropy'])
-    return {pos: np.mean(vals) for pos, vals in position_entropies.items()}
+def _compute_group_across_episode_entropy(
+    group_data: list,
+    min_visits: int = 5,
+) -> dict:
+    """Compute H(A|S=s) per position using empirical action counts (Dirichlet smoothed)."""
+    result = compute_empirical_entropy(group_data, min_visits=min_visits)
+    H_s = result['H_s']
+    include_mask = result['include_mask']
+    return {pos: val for pos, val in H_s.items() if include_mask.get(pos, False)}
 
 
 def _plot_grouped_entropy_heatmap(
@@ -1158,8 +1258,11 @@ def _plot_grouped_entropy_heatmap(
     env_mission: str = "",
     room_env_images: dict = None,
     max_groups: int = 25,
+    cmap_name: str = 'plasma',
+    colorbar_label: str = 'Entropy (bits)',
+    min_visits: int = 5,
 ) -> plt.Figure:
-    """Shared implementation for grouped entropy heatmaps (across-episode and per-timestep)."""
+    """Shared implementation for grouped entropy/KL heatmaps."""
     groups = group_routing_data(routing_data, group_by)
 
     if not groups:
@@ -1215,14 +1318,14 @@ def _plot_grouped_entropy_heatmap(
         hspace=0.35, wspace=0.35,
     )
 
-    cmap = plt.cm.plasma.copy()
+    cmap = plt.cm.get_cmap(cmap_name).copy()
     cmap.set_bad(color=UNVISITED_COLOR)
 
     entropy_im = None
 
     for row_idx, group_key in enumerate(sorted_keys):
         group_data = groups[group_key]
-        avg_entropy_by_pos = compute_entropy_fn(group_data)
+        avg_entropy_by_pos = compute_entropy_fn(group_data, min_visits=min_visits)
 
         col_idx = 0
         label = group_labels[group_key]
@@ -1261,7 +1364,7 @@ def _plot_grouped_entropy_heatmap(
 
     if entropy_im is not None:
         cbar_ax = fig.add_subplot(gs[:, num_main_cols])
-        fig.colorbar(entropy_im, cax=cbar_ax).set_label('Entropy (nats)')
+        fig.colorbar(entropy_im, cax=cbar_ax).set_label(colorbar_label)
 
     return fig
 
@@ -1273,20 +1376,22 @@ def plot_grouped_across_episode_entropy_heatmap(
     env_mission: str = "",
     room_env_images: dict = None,
     max_groups: int = 25,
+    min_visits: int = 5,
 ) -> plt.Figure:
     """
-    Grouped across-episode entropy heatmap: one row per group.
+    Grouped empirical action entropy heatmap: one row per group.
 
-    Each row shows H(-sum(p̄ * log(p̄))) where p̄ = mean softmax(logits) per position,
-    computed independently within each group.
+    Each row shows H(A|S=s) in bits computed from empirical action counts,
+    independently within each group.
 
     Args:
-        routing_data: List of sample dicts
-        group_by: Field to group by (e.g. 'door_location', 'door_and_box_row')
-        env_image: Optional fallback environment render
-        env_mission: Optional fallback mission string
-        room_env_images: Optional dict mapping group_key -> (image, mission)
-        max_groups: Maximum number of groups to display
+        routing_data: List of sample dicts with 'position' and 'action' keys.
+        group_by: Field to group by (e.g. 'door_location', 'door_and_box_row').
+        env_image: Optional fallback environment render.
+        env_mission: Optional fallback mission string.
+        room_env_images: Optional dict mapping group_key -> (image, mission).
+        max_groups: Maximum number of groups to display.
+        min_visits: Minimum visits to include a position.
 
     Returns:
         matplotlib Figure object
@@ -1294,47 +1399,144 @@ def plot_grouped_across_episode_entropy_heatmap(
     return _plot_grouped_entropy_heatmap(
         routing_data,
         compute_entropy_fn=_compute_group_across_episode_entropy,
-        title="Across-Episode Action Entropy",
+        title="Empirical Action Entropy H(A|S) [bits]",
         group_by=group_by,
         env_image=env_image,
         env_mission=env_mission,
         room_env_images=room_env_images,
         max_groups=max_groups,
+        cmap_name='plasma',
+        colorbar_label='Entropy (bits)',
+        min_visits=min_visits,
     )
 
 
-def plot_grouped_per_timestep_entropy_heatmap(
+def _compute_group_kl(
+    group_data: list,
+    min_visits: int = 5,
+) -> dict:
+    """Compute KL(pi_hat(.|s) || P(a)) per position using empirical action counts."""
+    result = compute_empirical_entropy(group_data, min_visits=min_visits)
+    KL_s = result['KL_s']
+    include_mask = result['include_mask']
+    return {pos: val for pos, val in KL_s.items() if include_mask.get(pos, False)}
+
+
+def plot_kl_heatmap(
+    routing_data: list,
+    env_image: np.ndarray = None,
+    env_mission: str = "",
+    min_visits: int = 5,
+) -> plt.Figure:
+    """
+    KL divergence heatmap: KL(pi_hat(.|s) || P(a)) in bits per grid cell.
+
+    Shows how informative each state is for distinguishing actions relative to
+    the global marginal action distribution. Uses inferno colormap.
+    Positions with fewer than min_visits visits are masked.
+
+    Args:
+        routing_data: List of dicts with 'position' and 'action' keys.
+        env_image: Optional environment render to show alongside.
+        env_mission: Optional mission string.
+        min_visits: Minimum number of visits to include a position.
+
+    Returns:
+        matplotlib Figure object
+    """
+    result = compute_empirical_entropy(routing_data, min_visits=min_visits)
+    KL_s = result['KL_s']
+    include_mask = result['include_mask']
+
+    if not KL_s:
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.text(0.5, 0.5, "No action data in routing_data", ha='center', va='center', fontsize=14)
+        ax.axis('off')
+        return fig
+
+    positions = list(KL_s.keys())
+    grid_info = compute_grid_bounds(positions)
+    grid_width = grid_info['grid_width']
+    grid_height = grid_info['grid_height']
+    x_min = grid_info['x_min']
+    y_min = grid_info['y_min']
+
+    kl_grid = np.full((grid_height, grid_width), np.nan)
+    for pos, val in KL_s.items():
+        if include_mask.get(pos, False):
+            gx, gy = pos[0] - x_min, pos[1] - y_min
+            kl_grid[gy, gx] = val
+
+    num_plots = 2 if env_image is not None else 1
+    fig, axes = plt.subplots(1, num_plots, figsize=(5 * num_plots, 5))
+    if num_plots == 1:
+        axes = [axes]
+
+    plot_idx = 0
+    if env_image is not None:
+        axes[plot_idx].imshow(env_image)
+        axes[plot_idx].set_title("Environment Layout")
+        if env_mission:
+            axes[plot_idx].set_xlabel(env_mission, fontsize=9)
+        axes[plot_idx].set_xticks([])
+        axes[plot_idx].set_yticks([])
+        plot_idx += 1
+
+    cmap = plt.cm.inferno.copy()
+    cmap.set_bad(color=UNVISITED_COLOR)
+    im = axes[plot_idx].imshow(kl_grid, origin='upper', cmap=cmap)
+    axes[plot_idx].set_title(f"KL Divergence KL(π̂(·|s) ∥ P(a)) [bits]\n(min_visits={min_visits})")
+    axes[plot_idx].set_xlabel("X")
+    axes[plot_idx].set_ylabel("Y")
+    axes[plot_idx].set_xticks(np.arange(-0.5, grid_width, 1), minor=True)
+    axes[plot_idx].set_yticks(np.arange(-0.5, grid_height, 1), minor=True)
+    axes[plot_idx].grid(which='minor', color='white', linestyle='-', linewidth=0.5)
+    axes[plot_idx].tick_params(which='minor', size=0)
+    fig.colorbar(im, ax=axes[plot_idx], label='KL divergence (bits)')
+
+    fig.tight_layout()
+    return fig
+
+
+def plot_grouped_kl_heatmap(
     routing_data: list,
     group_by: str,
     env_image: np.ndarray = None,
     env_mission: str = "",
     room_env_images: dict = None,
     max_groups: int = 25,
+    min_visits: int = 5,
 ) -> plt.Figure:
     """
-    Grouped per-timestep entropy heatmap: one row per group.
+    Grouped KL divergence heatmap: one row per group.
 
-    Each row shows mean(H(p_t)) per position, where H(p_t) is the pre-computed
-    per-timestep entropy, computed independently within each group.
+    Each row shows KL(pi_hat(.|s) || P(a)) in bits per position,
+    computed independently within each group. Uses inferno colormap.
 
     Args:
-        routing_data: List of sample dicts with 'entropy' key
-        group_by: Field to group by (e.g. 'door_location', 'door_and_box_row')
-        env_image: Optional fallback environment render
-        env_mission: Optional fallback mission string
-        room_env_images: Optional dict mapping group_key -> (image, mission)
-        max_groups: Maximum number of groups to display
+        routing_data: List of sample dicts with 'position' and 'action' keys.
+        group_by: Field to group by (e.g. 'door_location', 'door_and_box_row').
+        env_image: Optional fallback environment render.
+        env_mission: Optional fallback mission string.
+        room_env_images: Optional dict mapping group_key -> (image, mission).
+        max_groups: Maximum number of groups to display.
+        min_visits: Minimum visits to include a position.
 
     Returns:
         matplotlib Figure object
     """
     return _plot_grouped_entropy_heatmap(
         routing_data,
-        compute_entropy_fn=_compute_group_per_timestep_entropy,
-        title="Per-Timestep Action Entropy",
+        compute_entropy_fn=_compute_group_kl,
+        title="KL Divergence KL(π̂(·|s) ∥ P(a)) [bits]",
         group_by=group_by,
         env_image=env_image,
         env_mission=env_mission,
         room_env_images=room_env_images,
         max_groups=max_groups,
+        cmap_name='inferno',
+        colorbar_label='KL divergence (bits)',
+        min_visits=min_visits,
     )
+
+
