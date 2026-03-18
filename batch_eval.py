@@ -131,6 +131,7 @@ def save_routing_data(routing_data: list, checkpoint_path: Path, config: dict,
         t_step = sample.get('t_step')
         t_unlocked = sample.get('t_unlocked')
         t_pick = sample.get('t_pick')
+        t_drop = sample.get('t_drop')
         dist_to_door = sample.get('dist_to_door')
         dist_to_key = sample.get('dist_to_key')
         dist_to_target = sample.get('dist_to_target')
@@ -165,6 +166,7 @@ def save_routing_data(routing_data: list, checkpoint_path: Path, config: dict,
             't_step': int(t_step) if t_step is not None else None,
             't_unlocked': int(t_unlocked) if t_unlocked is not None else None,
             't_pick': int(t_pick) if t_pick is not None else None,
+            't_drop': int(t_drop) if t_drop is not None else None,
             'dist_to_door': float(dist_to_door) if dist_to_door is not None else None,
             'dist_to_key': float(dist_to_key) if dist_to_key is not None else None,
             'dist_to_target': float(dist_to_target) if dist_to_target is not None else None,
@@ -186,7 +188,7 @@ def save_routing_data(routing_data: list, checkpoint_path: Path, config: dict,
     }
 
     with open(cache_path / 'routing_data.json', 'w') as f:
-        json.dump(cache_data, f, indent=2)
+        json.dump(cache_data, f)
 
 
 def main():
