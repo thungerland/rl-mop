@@ -7,10 +7,11 @@ Always printed:
       2-phase (pre/post unlock):
         lpc/entropy/kl vs dist_to_door   [pre-unlock]
         lpc/entropy/kl vs dist_to_target [post-unlock]
-      3-phase (pre-key / post-key pre-unlock / post-unlock, requires t_pick):
+      4-phase (pre-key / with-key pre-unlock / with-key post-unlock / post-unlock post-key, requires t_pick/t_drop):
         lpc/entropy/kl vs dist_to_key    [pre-key]
-        lpc/entropy/kl vs dist_to_door   [post-key/pre-unlock]
-        lpc/entropy/kl vs dist_to_target [post-unlock]
+        lpc/entropy/kl vs dist_to_door   [with-key/pre-unlock]
+        lpc/entropy/kl vs dist_to_target [with-key/post-unlock]
+        lpc/entropy/kl vs dist_to_target [post-unlock/post-key]
 
 Optionally printed (pass group_by as third argument):
   - Grouped spatial correlation: spatial Pearson r computed independently per group
@@ -23,7 +24,7 @@ group_by options:
     door_and_box_row          — group by door+box configuration
     carrying_phase            — group by carrying phase (not carrying / carrying)
     unlock_phase              — group by episode timeline (pre-unlock / post-unlock)
-    key_phase                 — group by episode timeline (pre-key / post-key pre-unlock / post-unlock)
+    key_phase                 — group by episode timeline (pre-key / with-key pre-unlock / with-key post-unlock / post-unlock post-key)
     agent_and_target_quadrant — group by agent & target start quadrant
 
 Examples:
@@ -48,7 +49,14 @@ def _filter_by_phase(routing_data, phase):
     """Yield samples matching the given phase.
 
     Args:
-        phase: 'pre_unlock', 'post_unlock', 'pre_key', 'post_key_pre_unlock', or None (all samples).
+        phase: one of:
+            'pre_unlock'           — t_step < t_unlocked (or t_unlocked is None)
+            'post_unlock'          — t_step >= t_unlocked
+            'pre_key'              — t_step < t_pick (or t_pick is None)
+            'post_key_pre_unlock'  — t_pick <= t_step < t_unlocked
+            'with_key_post_unlock' — t_unlocked <= t_step < t_drop (or t_drop is None)
+            'post_unlock_post_key' — t_step >= t_drop
+            None                   — all samples
     """
     for s in routing_data:
         if phase is None:
@@ -73,6 +81,15 @@ def _filter_by_phase(routing_data, phase):
             if t_pick is not None and t_step >= t_pick:
                 if t_unlocked is None or t_step < t_unlocked:
                     yield s
+        elif phase == 'with_key_post_unlock':
+            t_drop = s.get('t_drop')
+            if t_unlocked is not None and t_step >= t_unlocked:
+                if t_drop is None or t_step < t_drop:
+                    yield s
+        elif phase == 'post_unlock_post_key':
+            t_drop = s.get('t_drop')
+            if t_drop is not None and t_step >= t_drop:
+                yield s
 
 
 def per_timestep_lpc_dist_correlation(routing_data: list, dist_field: str, phase: str = None) -> dict:
@@ -82,7 +99,8 @@ def per_timestep_lpc_dist_correlation(routing_data: list, dist_field: str, phase
     Args:
         routing_data: List of dicts with 'lpc' and the specified dist_field.
         dist_field: 'dist_to_door' or 'dist_to_target'.
-        phase: 'pre_unlock', 'post_unlock', or None (all timesteps).
+        phase: 'pre_unlock', 'post_unlock', 'pre_key', 'post_key_pre_unlock',
+               'with_key_post_unlock', 'post_unlock_post_key', or None (all timesteps).
 
     Returns:
         dict with keys 'r', 'p', 'n'.
@@ -115,7 +133,8 @@ def per_timestep_entropy_dist_correlation(
         routing_data: List of sample dicts.
         H_s: dict mapping position -> H(A|S=s) in bits (from compute_empirical_entropy, masked).
         dist_field: 'dist_to_door', 'dist_to_key', or 'dist_to_target'.
-        phase: 'pre_unlock', 'post_unlock', 'pre_key', 'post_key_pre_unlock', or None.
+        phase: 'pre_unlock', 'post_unlock', 'pre_key', 'post_key_pre_unlock',
+               'with_key_post_unlock', 'post_unlock_post_key', or None.
 
     Returns:
         dict with keys 'r', 'p', 'n'.
@@ -148,7 +167,8 @@ def per_timestep_kl_dist_correlation(
         routing_data: List of sample dicts.
         KL_s: dict mapping position -> KL divergence in bits (from compute_empirical_entropy, masked).
         dist_field: 'dist_to_door', 'dist_to_key', or 'dist_to_target'.
-        phase: 'pre_unlock', 'post_unlock', 'pre_key', 'post_key_pre_unlock', or None.
+        phase: 'pre_unlock', 'post_unlock', 'pre_key', 'post_key_pre_unlock',
+               'with_key_post_unlock', 'post_unlock_post_key', or None.
 
     Returns:
         dict with keys 'r', 'p', 'n'.
@@ -314,17 +334,20 @@ if __name__ == '__main__':
     has_t_pick = any(s.get('dist_to_key') is not None for s in routing_data[:10])
     if has_new_fields and has_t_pick:
         print()
-        print("Distance correlations [3-phase: pre-key / post-key pre-unlock / post-unlock]")
+        print("Distance correlations [4-phase: pre-key / with-key pre-unlock / with-key post-unlock / post-unlock post-key]")
         for dist_field, phase, label, fn, extra in [
-            ('dist_to_key',    'pre_key',             'lpc     vs dist_to_key    [pre-key            ]', per_timestep_lpc_dist_correlation,     (routing_data,)),
-            ('dist_to_key',    'pre_key',             'entropy vs dist_to_key    [pre-key            ]', per_timestep_entropy_dist_correlation,  (routing_data, H_s_masked)),
-            ('dist_to_key',    'pre_key',             'kl      vs dist_to_key    [pre-key            ]', per_timestep_kl_dist_correlation,       (routing_data, KL_s_masked)),
-            ('dist_to_door',   'post_key_pre_unlock', 'lpc     vs dist_to_door   [post-key/pre-unlock]', per_timestep_lpc_dist_correlation,     (routing_data,)),
-            ('dist_to_door',   'post_key_pre_unlock', 'entropy vs dist_to_door   [post-key/pre-unlock]', per_timestep_entropy_dist_correlation,  (routing_data, H_s_masked)),
-            ('dist_to_door',   'post_key_pre_unlock', 'kl      vs dist_to_door   [post-key/pre-unlock]', per_timestep_kl_dist_correlation,       (routing_data, KL_s_masked)),
-            ('dist_to_target', 'post_unlock',         'lpc     vs dist_to_target [post-unlock        ]', per_timestep_lpc_dist_correlation,     (routing_data,)),
-            ('dist_to_target', 'post_unlock',         'entropy vs dist_to_target [post-unlock        ]', per_timestep_entropy_dist_correlation,  (routing_data, H_s_masked)),
-            ('dist_to_target', 'post_unlock',         'kl      vs dist_to_target [post-unlock        ]', per_timestep_kl_dist_correlation,       (routing_data, KL_s_masked)),
+            ('dist_to_key',    'pre_key',             'lpc     vs dist_to_key    [pre-key                ]', per_timestep_lpc_dist_correlation,    (routing_data,)),
+            ('dist_to_key',    'pre_key',             'entropy vs dist_to_key    [pre-key                ]', per_timestep_entropy_dist_correlation, (routing_data, H_s_masked)),
+            ('dist_to_key',    'pre_key',             'kl      vs dist_to_key    [pre-key                ]', per_timestep_kl_dist_correlation,      (routing_data, KL_s_masked)),
+            ('dist_to_door',   'post_key_pre_unlock', 'lpc     vs dist_to_door   [with-key/pre-unlock    ]', per_timestep_lpc_dist_correlation,    (routing_data,)),
+            ('dist_to_door',   'post_key_pre_unlock', 'entropy vs dist_to_door   [with-key/pre-unlock    ]', per_timestep_entropy_dist_correlation, (routing_data, H_s_masked)),
+            ('dist_to_door',   'post_key_pre_unlock', 'kl      vs dist_to_door   [with-key/pre-unlock    ]', per_timestep_kl_dist_correlation,      (routing_data, KL_s_masked)),
+            ('dist_to_target', 'with_key_post_unlock','lpc     vs dist_to_target [with-key/post-unlock   ]', per_timestep_lpc_dist_correlation,    (routing_data,)),
+            ('dist_to_target', 'with_key_post_unlock','entropy vs dist_to_target [with-key/post-unlock   ]', per_timestep_entropy_dist_correlation, (routing_data, H_s_masked)),
+            ('dist_to_target', 'with_key_post_unlock','kl      vs dist_to_target [with-key/post-unlock   ]', per_timestep_kl_dist_correlation,      (routing_data, KL_s_masked)),
+            ('dist_to_target', 'post_unlock_post_key','lpc     vs dist_to_target [post-unlock/post-key   ]', per_timestep_lpc_dist_correlation,    (routing_data,)),
+            ('dist_to_target', 'post_unlock_post_key','entropy vs dist_to_target [post-unlock/post-key   ]', per_timestep_entropy_dist_correlation, (routing_data, H_s_masked)),
+            ('dist_to_target', 'post_unlock_post_key','kl      vs dist_to_target [post-unlock/post-key   ]', per_timestep_kl_dist_correlation,      (routing_data, KL_s_masked)),
         ]:
             res = fn(*extra, dist_field, phase)
             print(f"  {label}  r={res['r']:+.4f}  p={res['p']:.4e}  n={res['n']}")
