@@ -111,6 +111,7 @@ class EvalVectorEnv:
         self.episode_steps = np.zeros(num_envs, dtype=int)
         self.t_unlocked = [None] * num_envs  # first t_step when door_unlocked=1, per env
         self.t_pick = [None] * num_envs  # first t_step when carrying=1, per env
+        self.t_drop = [None] * num_envs  # first t_step when carrying drops to 0 post-unlock
         self.total_episodes = 0
         self.successful_episodes = 0
         self.sum_path_ratio = 0.0
@@ -333,6 +334,7 @@ class EvalVectorEnv:
             self.episode_steps[i] = 0
             self.t_unlocked[i] = None
             self.t_pick[i] = None
+            self.t_drop[i] = None
             self.expert_steps[i] = expert_steps
             return obs
 
@@ -383,6 +385,12 @@ class EvalVectorEnv:
                 carrying = int(obs.get('carrying_flag', 0))
                 if carrying == 1:
                     self.t_pick[i] = self.episode_steps[i]
+
+            if self.t_drop[i] is None and self.t_unlocked[i] is not None:
+                prev_carrying = int(self.obs_list[i].get('carrying_flag', 0))
+                curr_carrying = int(obs.get('carrying_flag', 0))
+                if prev_carrying == 1 and curr_carrying == 0:
+                    self.t_drop[i] = self.episode_steps[i]
 
             episode_over = term or trunc
 
@@ -526,6 +534,7 @@ def evaluate(policy, vec_env, num_episodes, device):
                 t_step = int(vec_env.episode_steps[i])
                 t_unlocked = vec_env.t_unlocked[i]
                 t_pick = vec_env.t_pick[i]
+                t_drop = vec_env.t_drop[i]
 
                 pos_x, pos_y = pos
                 door_pos = vec_env.door_positions[i]
@@ -562,6 +571,7 @@ def evaluate(policy, vec_env, num_episodes, device):
                     't_step': t_step,
                     't_unlocked': t_unlocked,
                     't_pick': t_pick,
+                    't_drop': t_drop,
                     'dist_to_door': dist_to_door,
                     'dist_to_key': dist_to_key,
                     'dist_to_target': dist_to_target,
