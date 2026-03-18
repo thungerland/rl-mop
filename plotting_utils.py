@@ -49,6 +49,7 @@ def build_routing_data_tuples(cache: dict) -> list:
             't_step': r.get('t_step'),
             't_unlocked': r.get('t_unlocked'),
             't_pick': r.get('t_pick'),
+            't_drop': r.get('t_drop'),
             'dist_to_door': r.get('dist_to_door'),
             'dist_to_key': r.get('dist_to_key'),
             'dist_to_target': r.get('dist_to_target'),
@@ -602,14 +603,17 @@ def group_routing_data(routing_data: list, group_by: str) -> dict[tuple, list]:
             t_step = sample.get('t_step')
             t_pick = sample.get('t_pick')
             t_unlocked = sample.get('t_unlocked')
+            t_drop = sample.get('t_drop')
             if t_step is None:
                 continue
             if t_pick is None or t_step < t_pick:
                 key = (0,)   # pre-key
             elif t_unlocked is None or t_step < t_unlocked:
-                key = (1,)   # post-key, pre-unlock
+                key = (1,)   # with-key, pre-unlock
+            elif t_drop is None or t_step < t_drop:
+                key = (2,)   # with-key, post-unlock
             else:
-                key = (2,)   # post-unlock
+                key = (3,)   # post-unlock, post-key (key dropped)
         else:
             key = env_context.get(group_by)
             if key is None:
@@ -788,12 +792,18 @@ def key_phase_labels_for_groups(sorted_keys: list) -> dict:
 
     Args:
         sorted_keys: List of group keys, each a 1-tuple (phase,)
-                     where 0 = pre-key, 1 = post-key/pre-unlock, 2 = post-unlock.
+                     where 0 = pre-key, 1 = with-key/pre-unlock, 2 = with-key/post-unlock,
+                     3 = post-unlock/post-key (key dropped).
 
     Returns:
         Dict mapping group_key -> label string
     """
-    labels = {(0,): "Pre-key", (1,): "Post-key (pre-unlock)", (2,): "Post-unlock"}
+    labels = {
+        (0,): "Pre-key",
+        (1,): "With-key (pre-unlock)",
+        (2,): "With-key (post-unlock)",
+        (3,): "Post-unlock (post-key)",
+    }
     return {k: labels.get(k, f"Phase {k[0]}") for k in sorted_keys}
 
 
