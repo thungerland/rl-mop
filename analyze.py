@@ -18,7 +18,7 @@ plot_type options (default: overall):
     by_door_location_across_episode_entropy      — empirical entropy grouped by door location
     by_door_and_box_row_across_episode_entropy   — empirical entropy grouped by door+box row
     by_door_unlocked_phase_across_episode_entropy — empirical entropy grouped by door locked/unlocked phase
-    by_key_phase                                 — routing heatmap grouped by key phase (pre-key / post-key pre-unlock / post-unlock)
+    by_key_phase                                 — routing heatmap grouped by key phase (pre-key / with-key pre-unlock / with-key post-unlock / post-unlock post-key)
     by_key_phase_across_episode_entropy          — empirical entropy grouped by key phase
     kl_heatmap                                   — KL(pi_hat || P_a) per grid cell
     by_door_location_kl                          — KL heatmap grouped by door location
