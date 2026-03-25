@@ -149,7 +149,7 @@ EXPERT_CMAPS = [
 ]
 
 # Color for unvisited cells
-UNVISITED_COLOR = (0.15, 0.15, 0.15)  # Dark gray
+UNVISITED_COLOR = (1.0, 1.0, 1.0)  # White for unvisited/no-data cells
 
 
 def compute_grid_bounds(positions: list[tuple]) -> dict:
@@ -204,20 +204,29 @@ def pos_to_quadrant(x: int, y: int, room_bounds: tuple) -> str:
         return "BR"
 
 
-def aggregate_routing_by_position(routing_data: list) -> tuple[dict, dict, list]:
+def aggregate_routing_by_position(
+    routing_data: list,
+    layer_expert_sizes: list = None,
+) -> tuple[dict, dict, dict, list]:
     """
-    Aggregate routing weights and LPC by position.
+    Aggregate routing weights, LPC, and per-layer LPC by position.
 
     Args:
         routing_data: List of dicts with keys position, layer_routing, lpc, env_context
+        layer_expert_sizes: Optional list of per-layer expert size lists, e.g.
+            [[0, 16, 32], [0, 16, 32], [0, 16, 32]]. When provided, computes
+            per-layer LPC = mean_t(sum_k(w_k * s_k^2)) per position per layer.
 
     Returns:
         avg_routing_by_pos: dict mapping position -> {layer_name: avg_weights}
         avg_lpc_by_pos: dict mapping position -> avg_lpc
+        avg_layer_lpc_by_pos: dict mapping position -> {layer_name: avg_layer_lpc}
+            (empty dict if layer_expert_sizes is None)
         layer_names: sorted list of layer names
     """
     position_routing = defaultdict(list)
     position_lpc = defaultdict(list)
+    position_layer_lpc = defaultdict(lambda: defaultdict(list))
 
     for sample in routing_data:
         pos = sample['position']
@@ -227,8 +236,16 @@ def aggregate_routing_by_position(routing_data: list) -> tuple[dict, dict, list]
         position_routing[pos].append(layer_routing)
         position_lpc[pos].append(lpc)
 
+        if layer_expert_sizes is not None:
+            for layer_idx, expert_sizes in enumerate(layer_expert_sizes):
+                layer_key = f'layer_{layer_idx}'
+                weights = layer_routing.get(layer_key)
+                if weights is not None:
+                    sizes_sq = np.array([s ** 2 for s in expert_sizes], dtype=np.float64)
+                    position_layer_lpc[pos][layer_key].append(float(np.dot(weights, sizes_sq)))
+
     if not position_routing:
-        return {}, {}, []
+        return {}, {}, {}, []
 
     # Compute averages
     avg_routing_by_pos = {}
@@ -240,10 +257,15 @@ def aggregate_routing_by_position(routing_data: list) -> tuple[dict, dict, list]
 
     avg_lpc_by_pos = {pos: np.mean(lpcs) for pos, lpcs in position_lpc.items()}
 
+    avg_layer_lpc_by_pos = {
+        pos: {layer: np.mean(vals) for layer, vals in layers.items()}
+        for pos, layers in position_layer_lpc.items()
+    }
+
     # Get layer names from first sample
     layer_names = sorted(list(position_routing.values())[0][0].keys())
 
-    return avg_routing_by_pos, avg_lpc_by_pos, layer_names
+    return avg_routing_by_pos, avg_lpc_by_pos, avg_layer_lpc_by_pos, layer_names
 
 
 def render_routing_heatmap(
@@ -314,7 +336,7 @@ def render_routing_heatmap(
     ax.tick_params(which='minor', size=0)
 
 
-def render_lpc_heatmap(ax, avg_lpc_by_pos: dict, grid_info: dict):
+def render_lpc_heatmap(ax, avg_lpc_by_pos: dict, grid_info: dict, vmin=None, vmax=None):
     """
     Render an LPC heatmap on the given axes.
 
@@ -324,6 +346,7 @@ def render_lpc_heatmap(ax, avg_lpc_by_pos: dict, grid_info: dict):
         ax: Matplotlib axes to render on
         avg_lpc_by_pos: dict mapping position -> avg_lpc
         grid_info: dict from compute_grid_bounds()
+        vmin, vmax: Optional color scale bounds (for shared scaling across columns)
     """
     grid_width = grid_info['grid_width']
     grid_height = grid_info['grid_height']
@@ -342,8 +365,8 @@ def render_lpc_heatmap(ax, avg_lpc_by_pos: dict, grid_info: dict):
     cmap = plt.cm.viridis.copy()
     cmap.set_bad(color=UNVISITED_COLOR)
 
-    im = ax.imshow(lpc_grid, origin='upper', cmap=cmap)
-    ax.set_title("Mean LPC by Position")
+    im = ax.imshow(lpc_grid, origin='upper', cmap=cmap, vmin=vmin, vmax=vmax)
+    ax.set_title("Mean LPC")
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
 
@@ -356,28 +379,82 @@ def render_lpc_heatmap(ax, avg_lpc_by_pos: dict, grid_info: dict):
     return im
 
 
+def render_layer_lpc_heatmap(
+    ax,
+    avg_layer_lpc_by_pos: dict,
+    grid_info: dict,
+    layer_name: str,
+    vmin=None,
+    vmax=None,
+):
+    """
+    Render a per-layer LPC heatmap: mean_t(sum_k(w_k * s_k^2)) per cell for one layer.
+
+    Unvisited cells are rendered as dark gray (NaN in colormap).
+
+    Args:
+        ax: Matplotlib axes to render on
+        avg_layer_lpc_by_pos: dict mapping position -> {layer_name: avg_layer_lpc}
+        grid_info: dict from compute_grid_bounds()
+        layer_name: which layer to render (e.g. 'layer_0')
+        vmin, vmax: Optional color scale bounds (for shared scaling across columns)
+    """
+    grid_width = grid_info['grid_width']
+    grid_height = grid_info['grid_height']
+    x_min = grid_info['x_min']
+    y_min = grid_info['y_min']
+
+    lpc_grid = np.full((grid_height, grid_width), np.nan)
+
+    for pos, layer_lpcs in avg_layer_lpc_by_pos.items():
+        val = layer_lpcs.get(layer_name)
+        if val is not None:
+            x, y = pos
+            gx, gy = x - x_min, y - y_min
+            lpc_grid[gy, gx] = val
+
+    cmap = plt.cm.viridis.copy()
+    cmap.set_bad(color=UNVISITED_COLOR)
+
+    im = ax.imshow(lpc_grid, origin='upper', cmap=cmap, vmin=vmin, vmax=vmax)
+    ax.set_title(f"{layer_name} LPC")
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+
+    ax.set_xticks(np.arange(-0.5, grid_width, 1), minor=True)
+    ax.set_yticks(np.arange(-0.5, grid_height, 1), minor=True)
+    ax.grid(which='minor', color='white', linestyle='-', linewidth=0.5)
+    ax.tick_params(which='minor', size=0)
+
+    return im
+
+
 def plot_overall_routing(
     routing_data: list,
     env_image: np.ndarray = None,
     env_mission: str = "",
+    layer_expert_sizes: list = None,
 ) -> plt.Figure:
     """
     Create a complete routing visualization figure.
 
-    Shows environment layout (if provided), routing heatmaps for each layer,
-    and an LPC heatmap. Unvisited cells are rendered as dark gray.
+    Shows environment layout (if provided), mean LPC heatmap, and per-layer LPC
+    heatmaps. Columns go from general (mean LPC) to specific (per-layer LPC).
+    All LPC columns share a single viridis colorbar with global vmin/vmax.
 
     Args:
         routing_data: List of dicts with keys position, layer_routing, lpc, env_context
         env_image: Optional environment render to show
         env_mission: Optional language instruction to show under the environment image
+        layer_expert_sizes: Optional list of per-layer expert size lists, e.g.
+            [[0, 16, 32], [0, 16, 32], [0, 16, 32]]. Required for per-layer LPC columns.
 
     Returns:
         matplotlib Figure object
     """
     # Aggregate data
-    avg_routing_by_pos, avg_lpc_by_pos, layer_names = aggregate_routing_by_position(
-        routing_data
+    avg_routing_by_pos, avg_lpc_by_pos, avg_layer_lpc_by_pos, layer_names = (
+        aggregate_routing_by_position(routing_data, layer_expert_sizes=layer_expert_sizes)
     )
 
     if not avg_routing_by_pos:
@@ -390,74 +467,61 @@ def plot_overall_routing(
     positions = list(avg_routing_by_pos.keys())
     grid_info = compute_grid_bounds(positions)
 
-    # Get number of experts per layer
-    sample_routing = list(avg_routing_by_pos.values())[0]
-    num_experts_per_layer = [len(sample_routing[ln]) for ln in layer_names]
+    has_layer_lpc = bool(avg_layer_lpc_by_pos)
 
-    # Determine subplot layout
-    num_heatmaps = len(layer_names)
-    num_plots = num_heatmaps + 1  # +1 for LPC
-    if env_image is not None:
-        num_plots += 1
+    # Column layout: [env?] | [mean LPC] | [layer_0 LPC] | ... | [colorbar]
+    num_lpc_cols = 1 + (len(layer_names) if has_layer_lpc else 0)  # mean + per-layer
+    num_main_cols = num_lpc_cols + (1 if env_image is not None else 0)
+    num_cols = num_main_cols + 1  # +1 for shared colorbar column
 
-    num_experts = max(num_experts_per_layer)
-
-    # GridSpec layout: top row has main plots + narrow LPC colorbar column,
-    # bottom row has expert colorbars spanning the full width.
-    # The LPC colorbar gets its own column so it doesn't steal from the LPC plot.
-    num_cols = num_plots + 1  # +1 for dedicated LPC colorbar column
-    fig = plt.figure(figsize=(5 * num_plots, 7))
+    fig = plt.figure(figsize=(5 * num_main_cols, 7))
     gs = gridspec.GridSpec(
-        2, num_cols,
-        height_ratios=[1, 0.04],
-        width_ratios=[1] * num_plots + [0.05],
+        1, num_cols,
+        width_ratios=[1] * num_main_cols + [0.05],
         hspace=0.08, wspace=0.35,
     )
-
-    # Main plot axes (top row)
-    axes = [fig.add_subplot(gs[0, i]) for i in range(num_plots)]
 
     plot_idx = 0
 
     # Environment render (if provided)
     if env_image is not None:
-        axes[plot_idx].imshow(env_image)
-        axes[plot_idx].set_title("Environment Layout")
+        ax = fig.add_subplot(gs[0, plot_idx])
+        ax.imshow(env_image)
+        ax.set_title("Environment Layout")
         if env_mission:
-            axes[plot_idx].set_xlabel(env_mission, fontsize=9)
-            axes[plot_idx].set_xticks([])
-            axes[plot_idx].set_yticks([])
+            ax.set_xlabel(env_mission, fontsize=9)
+            ax.set_xticks([])
+            ax.set_yticks([])
         else:
-            axes[plot_idx].axis('off')
+            ax.axis('off')
         plot_idx += 1
 
-    # Routing heatmaps for each layer
-    for layer_name in layer_names:
-        render_routing_heatmap(axes[plot_idx], avg_routing_by_pos, grid_info, layer_name)
-        plot_idx += 1
+    # Compute shared color scale across all LPC values
+    all_lpc_vals = list(avg_lpc_by_pos.values())
+    if has_layer_lpc:
+        for layer_lpcs in avg_layer_lpc_by_pos.values():
+            all_lpc_vals.extend(layer_lpcs.values())
+    global_vmin = float(np.nanmin(all_lpc_vals)) if all_lpc_vals else None
+    global_vmax = float(np.nanmax(all_lpc_vals)) if all_lpc_vals else None
 
-    # LPC heatmap with its own dedicated colorbar column
-    lpc_im = render_lpc_heatmap(axes[plot_idx], avg_lpc_by_pos, grid_info)
-    lpc_cbar_ax = fig.add_subplot(gs[0, num_plots])
-    lpc_cbar = fig.colorbar(lpc_im, cax=lpc_cbar_ax)
-    lpc_cbar.set_label('LPC')
+    # Mean LPC heatmap (general, leftmost data column)
+    ax = fig.add_subplot(gs[0, plot_idx])
+    lpc_im = render_lpc_heatmap(ax, avg_lpc_by_pos, grid_info, vmin=global_vmin, vmax=global_vmax)
+    plot_idx += 1
 
-    # Expert colorbars along the bottom row, spanning the main plot columns
-    for i in range(num_experts):
-        cbar_ax = fig.add_subplot(gs[1, i])
-        norm = mcolors.Normalize(vmin=0.3, vmax=1.0)
-        sm = plt.cm.ScalarMappable(cmap=EXPERT_CMAPS[i], norm=norm)
-        sm.set_array([])
-        cb = fig.colorbar(sm, cax=cbar_ax, orientation='horizontal')
-        cb.set_label(f'Expert {i}', fontsize=9)
-        cb.set_ticks([0.3, 0.5, 0.7, 0.9])
-        cb.set_ticklabels(['0.3', '0.5', '0.7', '0.9'])
-        cb.ax.tick_params(labelsize=7)
+    # Per-layer LPC heatmaps (specific, right of mean LPC)
+    if has_layer_lpc:
+        for layer_name in layer_names:
+            ax = fig.add_subplot(gs[0, plot_idx])
+            render_layer_lpc_heatmap(
+                ax, avg_layer_lpc_by_pos, grid_info, layer_name,
+                vmin=global_vmin, vmax=global_vmax,
+            )
+            plot_idx += 1
 
-    # Hide any unused bottom-row cells
-    for i in range(num_experts, num_cols):
-        ax_empty = fig.add_subplot(gs[1, i])
-        ax_empty.axis('off')
+    # Shared colorbar
+    cbar_ax = fig.add_subplot(gs[0, num_main_cols])
+    fig.colorbar(lpc_im, cax=cbar_ax).set_label('LPC')
 
     return fig
 
@@ -821,12 +885,14 @@ def plot_grouped_routing(
     env_mission: str = "",
     room_env_images: dict = None,
     max_groups: int = 25,
+    layer_expert_sizes: list = None,
 ) -> plt.Figure:
     """
-    Create a multi-row figure with one row of heatmaps per group.
+    Create a multi-row figure with one row of LPC heatmaps per group.
 
-    Each row shows: [env_image | layer_0 | layer_1 | ... | LPC]
-    Row labels indicate the group (e.g., which starting room).
+    Each row shows: [env_image?] | [mean LPC] | [layer_0 LPC] | [layer_1 LPC] | ...
+    Columns go from general (mean LPC) to specific (per-layer LPC).
+    All LPC columns share a single viridis colorbar with global vmin/vmax.
 
     Args:
         routing_data: List of (position, layer_routing, lpc, env_context) tuples
@@ -835,6 +901,7 @@ def plot_grouped_routing(
         env_mission: Optional fallback mission string
         room_env_images: Optional dict mapping group_key -> (image, mission) per group
         max_groups: Maximum number of groups to display
+        layer_expert_sizes: Optional list of per-layer expert size lists for per-layer LPC
 
     Returns:
         matplotlib Figure object
@@ -856,8 +923,10 @@ def plot_grouped_routing(
     first_ctx = routing_data[0]['env_context']
     room_grid_shape = first_ctx.get('room_grid_shape')
 
-    # Aggregate each group to determine layer names and num_experts
-    first_avg, _, layer_names = aggregate_routing_by_position(groups[sorted_keys[0]])
+    # Aggregate first group to get layer names
+    first_avg, _, _, layer_names = aggregate_routing_by_position(
+        groups[sorted_keys[0]], layer_expert_sizes=layer_expert_sizes
+    )
     if not first_avg:
         fig, ax = plt.subplots(1, 1, figsize=(6, 4))
         ax.text(0.5, 0.5, "No visited positions in first group",
@@ -865,29 +934,40 @@ def plot_grouped_routing(
         ax.axis('off')
         return fig
 
-    sample_routing = list(first_avg.values())[0]
-    num_experts = max(len(sample_routing[ln]) for ln in layer_names)
+    # Pre-aggregate all groups to compute global vmin/vmax across all LPC values
+    group_aggregates = {}
+    all_lpc_vals = []
+    for group_key in sorted_keys:
+        avg_routing, avg_lpc, avg_layer_lpc, _ = aggregate_routing_by_position(
+            groups[group_key], layer_expert_sizes=layer_expert_sizes
+        )
+        if not avg_routing:
+            continue
+        group_aggregates[group_key] = (avg_routing, avg_lpc, avg_layer_lpc)
+        all_lpc_vals.extend(avg_lpc.values())
+        for layer_lpcs in avg_layer_lpc.values():
+            all_lpc_vals.extend(layer_lpcs.values())
 
-    # Layout: columns = [env_image?] + [layer heatmaps] + [LPC] + [LPC colorbar]
-    num_main_cols = len(layer_names) + 1  # layers + LPC
+    global_vmin = float(np.nanmin(all_lpc_vals)) if all_lpc_vals else None
+    global_vmax = float(np.nanmax(all_lpc_vals)) if all_lpc_vals else None
+
+    has_layer_lpc = any(agg[2] for agg in group_aggregates.values())
+
+    # Column layout: [env?] | [mean LPC] | [layer_0 LPC] | ... | [colorbar]
+    num_lpc_cols = 1 + (len(layer_names) if has_layer_lpc else 0)
     has_env_image = env_image is not None
-    if has_env_image:
-        num_main_cols += 1
-
-    num_cols = num_main_cols + 1  # +1 for LPC colorbar column
+    num_main_cols = num_lpc_cols + (1 if has_env_image else 0)
+    num_cols = num_main_cols + 1  # +1 for shared colorbar column
 
     # Figure dimensions
     col_width = 4.5
     row_height = 4.5
-    fig = plt.figure(figsize=(col_width * num_main_cols, row_height * num_groups + 1.2))
+    fig = plt.figure(figsize=(col_width * num_main_cols, row_height * num_groups + 0.5))
 
-    # GridSpec: num_groups rows for data + 1 row for expert colorbars
-    height_ratios = [1] * num_groups + [0.04]
     width_ratios = [1] * num_main_cols + [0.05]
-
     gs = gridspec.GridSpec(
-        num_groups + 1, num_cols,
-        height_ratios=height_ratios,
+        num_groups, num_cols,
+        height_ratios=[1] * num_groups,
         width_ratios=width_ratios,
         hspace=0.35, wspace=0.35,
     )
@@ -896,7 +976,7 @@ def plot_grouped_routing(
     all_positions = [sample['position'] for sample in routing_data]
     global_grid_info = compute_grid_bounds(all_positions)
 
-    lpc_im = None  # Track for colorbar
+    lpc_im = None  # Track last rendered image for colorbar
 
     # Compute human-readable labels for all groups
     if group_by == 'agent_start_room':
@@ -917,16 +997,15 @@ def plot_grouped_routing(
         group_labels = {k: f"{group_by}={k}" for k in sorted_keys}
 
     for row_idx, group_key in enumerate(sorted_keys):
-        group_data = groups[group_key]
-        avg_routing, avg_lpc, _ = aggregate_routing_by_position(group_data)
-
-        if not avg_routing:
+        if group_key not in group_aggregates:
             continue
 
+        avg_routing, avg_lpc, avg_layer_lpc = group_aggregates[group_key]
+        group_data = groups[group_key]
         col_idx = 0
         label = group_labels[group_key]
 
-        # Environment image (per-room if available, otherwise fallback)
+        # Environment image (per-group if available, otherwise fallback)
         if has_env_image:
             if room_env_images and group_key in room_env_images:
                 row_image, row_mission = room_env_images[group_key]
@@ -943,47 +1022,37 @@ def plot_grouped_routing(
                 ax.set_title("Environment Layout")
             col_idx += 1
 
-        # Routing heatmaps for each layer
-        for layer_name in layer_names:
-            ax = fig.add_subplot(gs[row_idx, col_idx])
-            render_routing_heatmap(ax, avg_routing, global_grid_info, layer_name)
-            if row_idx == 0:
-                ax.set_title(f"{layer_name}\n(color=expert, intensity=confidence)")
-            else:
-                ax.set_title("")
-            if not has_env_image and col_idx == 0:
-                ax.set_ylabel(f"{label}\n({len(group_data)} samples)", fontsize=9)
-            col_idx += 1
-
-        # LPC heatmap
+        # Mean LPC heatmap (general)
         ax = fig.add_subplot(gs[row_idx, col_idx])
-        lpc_im = render_lpc_heatmap(ax, avg_lpc, global_grid_info)
+        if not has_env_image and col_idx == 0:
+            ax.set_ylabel(f"{label}\n({len(group_data)} samples)", fontsize=9)
+        lpc_im = render_lpc_heatmap(
+            ax, avg_lpc, global_grid_info, vmin=global_vmin, vmax=global_vmax
+        )
         if row_idx == 0:
-            ax.set_title("Mean LPC by Position")
+            ax.set_title("Mean LPC")
         else:
             ax.set_title("")
+        col_idx += 1
 
-    # LPC colorbar in the dedicated column (spanning all data rows)
+        # Per-layer LPC heatmaps (specific)
+        if has_layer_lpc:
+            for layer_name in layer_names:
+                ax = fig.add_subplot(gs[row_idx, col_idx])
+                render_layer_lpc_heatmap(
+                    ax, avg_layer_lpc, global_grid_info, layer_name,
+                    vmin=global_vmin, vmax=global_vmax,
+                )
+                if row_idx == 0:
+                    ax.set_title(f"{layer_name} LPC")
+                else:
+                    ax.set_title("")
+                col_idx += 1
+
+    # Shared colorbar spanning all rows
     if lpc_im is not None:
-        lpc_cbar_ax = fig.add_subplot(gs[:num_groups, num_main_cols])
-        fig.colorbar(lpc_im, cax=lpc_cbar_ax).set_label('LPC')
-
-    # Expert colorbars along the bottom row
-    for i in range(num_experts):
-        cbar_ax = fig.add_subplot(gs[num_groups, i])
-        norm = mcolors.Normalize(vmin=0.3, vmax=1.0)
-        sm = plt.cm.ScalarMappable(cmap=EXPERT_CMAPS[i], norm=norm)
-        sm.set_array([])
-        cb = fig.colorbar(sm, cax=cbar_ax, orientation='horizontal')
-        cb.set_label(f'Expert {i}', fontsize=9)
-        cb.set_ticks([0.3, 0.5, 0.7, 0.9])
-        cb.set_ticklabels(['0.3', '0.5', '0.7', '0.9'])
-        cb.ax.tick_params(labelsize=7)
-
-    # Hide unused bottom-row cells
-    for i in range(num_experts, num_cols):
-        ax_empty = fig.add_subplot(gs[num_groups, i])
-        ax_empty.axis('off')
+        cbar_ax = fig.add_subplot(gs[:, num_main_cols])
+        fig.colorbar(lpc_im, cax=cbar_ax).set_label('LPC')
 
     return fig
 

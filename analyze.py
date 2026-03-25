@@ -107,6 +107,17 @@ with open(cache_path) as f:
 
 routing_data = build_routing_data_tuples(cache)
 
+# Load expert_hidden_sizes for per-layer LPC computation.
+# Fallback: config.yaml (reliable default for all runs).
+expert_hidden_sizes = cache.get('expert_hidden_sizes')
+if expert_hidden_sizes is None:
+    import yaml
+    config_path = pathlib.Path('config.yaml')
+    if config_path.exists():
+        with open(config_path) as _f:
+            _cfg = yaml.safe_load(_f)
+        expert_hidden_sizes = _cfg.get('expert_hidden_sizes')
+
 metrics = cache["metrics"]
 print(
     f"Loaded {len(routing_data)} timesteps | "
@@ -222,7 +233,10 @@ group_by_map = {
 }
 
 if plot_type == "overall":
-    fig = plot_overall_routing(routing_data, env_image=env_image, env_mission=env_mission)
+    fig = plot_overall_routing(
+        routing_data, env_image=env_image, env_mission=env_mission,
+        layer_expert_sizes=expert_hidden_sizes,
+    )
 
 elif plot_type in GROUPED_ROUTING_TYPES:
     group_by, per_group_images = group_by_map[plot_type]
@@ -232,6 +246,7 @@ elif plot_type in GROUPED_ROUTING_TYPES:
         env_image=env_image,
         env_mission=env_mission,
         room_env_images=per_group_images,
+        layer_expert_sizes=expert_hidden_sizes,
     )
 
 elif plot_type == "action_frequency":

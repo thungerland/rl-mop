@@ -177,6 +177,7 @@ def save_routing_data(routing_data: list, checkpoint_path: Path, config: dict,
         'checkpoint_path': str(checkpoint_path),
         'num_episodes': int(num_episodes),
         'evaluated_at': datetime.now().isoformat(),
+        'expert_hidden_sizes': config.get('expert_hidden_sizes'),
         'metrics': {
             'success_rate': float(metrics['success_rate']),
             'path_ratio': float(metrics['path_ratio']),
