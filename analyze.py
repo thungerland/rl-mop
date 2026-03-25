@@ -20,11 +20,16 @@ plot_type options (default: overall):
     by_door_unlocked_phase_across_episode_entropy — empirical entropy grouped by door locked/unlocked phase
     by_key_phase                                 — routing heatmap grouped by key phase (pre-key / with-key pre-unlock / with-key post-unlock / post-unlock post-key)
     by_key_phase_across_episode_entropy          — empirical entropy grouped by key phase
-    kl_heatmap                                   — KL(pi_hat || P_a) per grid cell
-    by_door_location_kl                          — KL heatmap grouped by door location
-    by_door_and_box_row_kl                       — KL heatmap grouped by door+box row
-    by_door_unlocked_phase_kl                    — KL heatmap grouped by door locked/unlocked phase
-    by_key_phase_kl                              — KL heatmap grouped by key phase
+    kl_heatmap                                   — KL_local(pi_hat || P_a^local) per grid cell
+    by_door_location_kl                          — KL_local heatmap grouped by door location
+    by_door_and_box_row_kl                       — KL_local heatmap grouped by door+box row
+    by_door_unlocked_phase_kl                    — KL_local heatmap grouped by door locked/unlocked phase
+    by_key_phase_kl                              — KL_local heatmap grouped by key phase
+    kl_heatmap_global                            — KL_global(pi_hat || P_a^global) per grid cell
+    by_door_location_kl_global                   — KL_global heatmap grouped by door location
+    by_door_and_box_row_kl_global                — KL_global heatmap grouped by door+box row
+    by_door_unlocked_phase_kl_global             — KL_global heatmap grouped by door locked/unlocked phase
+    by_key_phase_kl_global                       — KL_global heatmap grouped by key phase
 
 Examples:
     python analyze.py BabyAI-GoToDoor-v0 0
@@ -52,6 +57,7 @@ from plotting_utils import (
     plot_cell_action_distribution,
     group_routing_data,
     pos_to_quadrant,
+    compute_empirical_entropy,
 )
 from eval_mop import _first_target_pos
 
@@ -87,6 +93,11 @@ ALL_TYPES = {"overall"} | GROUPED_ROUTING_TYPES | {
     "by_door_and_box_row_kl",
     "by_door_unlocked_phase_kl",
     "by_key_phase_kl",
+    "kl_heatmap_global",
+    "by_door_location_kl_global",
+    "by_door_and_box_row_kl_global",
+    "by_door_unlocked_phase_kl_global",
+    "by_key_phase_kl_global",
     "cell_action_distribution",
 }
 
@@ -106,6 +117,7 @@ with open(cache_path) as f:
     cache = json.load(f)
 
 routing_data = build_routing_data_tuples(cache)
+_P_a_global = compute_empirical_entropy(routing_data)['P_a']
 
 # Load expert_hidden_sizes for per-layer LPC computation.
 # Fallback: config.yaml (reliable default for all runs).
@@ -309,6 +321,37 @@ elif plot_type == "by_key_phase_kl":
         env_image=env_image, env_mission=env_mission,
     )
 
+elif plot_type == "kl_heatmap_global":
+    fig = plot_kl_heatmap(routing_data, env_image=env_image, env_mission=env_mission, P_a=_P_a_global)
+
+elif plot_type == "by_door_location_kl_global":
+    fig = plot_grouped_kl_heatmap(
+        routing_data, group_by="door_location",
+        env_image=env_image, env_mission=env_mission, room_env_images=door_env_images,
+        P_a=_P_a_global,
+    )
+
+elif plot_type == "by_door_and_box_row_kl_global":
+    fig = plot_grouped_kl_heatmap(
+        routing_data, group_by="door_and_box_row",
+        env_image=env_image, env_mission=env_mission, room_env_images=door_and_box_env_images,
+        P_a=_P_a_global,
+    )
+
+elif plot_type == "by_door_unlocked_phase_kl_global":
+    fig = plot_grouped_kl_heatmap(
+        routing_data, group_by="door_unlocked_phase",
+        env_image=env_image, env_mission=env_mission,
+        P_a=_P_a_global,
+    )
+
+elif plot_type == "by_key_phase_kl_global":
+    fig = plot_grouped_kl_heatmap(
+        routing_data, group_by="key_phase",
+        env_image=env_image, env_mission=env_mission,
+        P_a=_P_a_global,
+    )
+
 elif plot_type == "cell_action_distribution":
     fig = plot_cell_action_distribution(routing_data)
 
@@ -331,11 +374,16 @@ filename_map = {
     "by_door_unlocked_phase_across_episode_entropy": "entropy_by_door_unlocked_phase.png",
     "by_key_phase":                                "routing_heatmap_by_key_phase.png",
     "by_key_phase_across_episode_entropy":         "entropy_by_key_phase.png",
-    "kl_heatmap":                                  "kl_heatmap.png",
-    "by_door_location_kl":                         "kl_by_door_location.png",
-    "by_door_and_box_row_kl":                      "kl_by_door_and_box_row.png",
-    "by_door_unlocked_phase_kl":                   "kl_by_door_unlocked_phase.png",
-    "by_key_phase_kl":                             "kl_by_key_phase.png",
+    "kl_heatmap":                                  "kl_local_heatmap.png",
+    "by_door_location_kl":                         "kl_local_by_door_location.png",
+    "by_door_and_box_row_kl":                      "kl_local_by_door_and_box_row.png",
+    "by_door_unlocked_phase_kl":                   "kl_local_by_door_unlocked_phase.png",
+    "by_key_phase_kl":                             "kl_local_by_key_phase.png",
+    "kl_heatmap_global":                           "kl_global_heatmap.png",
+    "by_door_location_kl_global":                  "kl_global_by_door_location.png",
+    "by_door_and_box_row_kl_global":               "kl_global_by_door_and_box_row.png",
+    "by_door_unlocked_phase_kl_global":            "kl_global_by_door_unlocked_phase.png",
+    "by_key_phase_kl_global":                      "kl_global_by_key_phase.png",
     "cell_action_distribution":                    "cell_action_distribution.png",
 }
 
