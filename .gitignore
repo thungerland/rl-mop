@@ -71,6 +71,7 @@ evaluation_cache_oldmodal/
 
 # Saved plots
 plots/
+corr_plots/
 
 # Data
 data/
