@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import matplotlib.gridspec as gridspec
 from collections import defaultdict
+from functools import partial
 
 
 def build_routing_data_tuples(cache: dict) -> list:
@@ -63,6 +64,7 @@ def compute_empirical_entropy(
     n_actions: int = 7,
     alpha: float = 0.5,
     min_visits: int = 5,
+    P_a: np.ndarray = None,
 ) -> dict:
     """
     Compute empirical action entropy per grid position from actual actions taken.
@@ -71,7 +73,7 @@ def compute_empirical_entropy(
     smoothing (alpha=0.5, Jeffreys prior), then computes:
       - pi_hat(a|s): smoothed empirical distribution
       - H(A|S=s) in bits (log2)
-      - KL(pi_hat(.|s) || P(a)) in bits
+      - KL(pi_hat(.|s) || P_a_ref) in bits
       - P(s): visitation frequency
       - include_mask: positions with n_visits >= min_visits
 
@@ -80,9 +82,13 @@ def compute_empirical_entropy(
         n_actions: Number of discrete actions (7 for BabyAI).
         alpha: Dirichlet smoothing concentration (Jeffreys prior = 0.5).
         min_visits: Minimum visits to include a position in analysis.
+        P_a: Optional reference marginal action distribution (shape (n_actions,)).
+            If None, P_a is computed from routing_data (local/phase marginal).
+            Pass a pre-computed global P_a to get KL relative to the global marginal.
 
     Returns:
         dict with keys: 'pi_hat', 'H_s', 'KL_s', 'P_s', 'include_mask', 'P_a'
+        'P_a' in the return dict always reflects the distribution actually used for KL.
     """
     valid = [s for s in routing_data if s.get('action') is not None]
     if not valid:
@@ -97,11 +103,14 @@ def compute_empirical_entropy(
 
     total_visits = sum(c.sum() for c in counts.values())
 
-    # Marginal action distribution (Dirichlet-smoothed)
+    # Marginal action distribution (Dirichlet-smoothed) from input data
     global_counts = np.zeros(n_actions, dtype=np.float64)
     for c in counts.values():
         global_counts += c
-    P_a = (global_counts + alpha) / (global_counts.sum() + n_actions * alpha)
+    P_a_local = (global_counts + alpha) / (global_counts.sum() + n_actions * alpha)
+
+    # Use provided P_a as reference if given, otherwise use local marginal
+    P_a_ref = P_a if P_a is not None else P_a_local
 
     pi_hat, H_s, KL_s, P_s, include_mask = {}, {}, {}, {}, {}
     for pos, c in counts.items():
@@ -109,7 +118,7 @@ def compute_empirical_entropy(
         smoothed = (c + alpha) / (n + n_actions * alpha)
         pi_hat[pos] = smoothed
         H_s[pos] = float(-np.sum(smoothed * np.log2(smoothed + 1e-12)))
-        KL_s[pos] = float(np.sum(smoothed * np.log2((smoothed + 1e-12) / (P_a + 1e-12))))
+        KL_s[pos] = float(np.sum(smoothed * np.log2((smoothed + 1e-12) / (P_a_ref + 1e-12))))
         P_s[pos] = n / total_visits
         include_mask[pos] = bool(n >= min_visits)
 
@@ -119,7 +128,7 @@ def compute_empirical_entropy(
         'KL_s': KL_s,
         'P_s': P_s,
         'include_mask': include_mask,
-        'P_a': P_a,
+        'P_a': P_a_ref,
     }
 
 
@@ -1500,9 +1509,16 @@ def plot_grouped_across_episode_entropy_heatmap(
 def _compute_group_kl(
     group_data: list,
     min_visits: int = 5,
+    P_a: np.ndarray = None,
 ) -> dict:
-    """Compute KL(pi_hat(.|s) || P(a)) per position using empirical action counts."""
-    result = compute_empirical_entropy(group_data, min_visits=min_visits)
+    """Compute KL(pi_hat(.|s) || P_a_ref) per position using empirical action counts.
+
+    Args:
+        group_data: List of sample dicts.
+        min_visits: Minimum visits to include a position.
+        P_a: Optional reference marginal. If None, computed from group_data (local).
+    """
+    result = compute_empirical_entropy(group_data, min_visits=min_visits, P_a=P_a)
     KL_s = result['KL_s']
     include_mask = result['include_mask']
     return {pos: val for pos, val in KL_s.items() if include_mask.get(pos, False)}
@@ -1513,12 +1529,13 @@ def plot_kl_heatmap(
     env_image: np.ndarray = None,
     env_mission: str = "",
     min_visits: int = 5,
+    P_a: np.ndarray = None,
 ) -> plt.Figure:
     """
-    KL divergence heatmap: KL(pi_hat(.|s) || P(a)) in bits per grid cell.
+    KL divergence heatmap: KL(pi_hat(.|s) || P_a_ref) in bits per grid cell.
 
     Shows how informative each state is for distinguishing actions relative to
-    the global marginal action distribution. Uses inferno colormap.
+    the reference marginal action distribution. Uses inferno colormap.
     Positions with fewer than min_visits visits are masked.
 
     Args:
@@ -1526,11 +1543,13 @@ def plot_kl_heatmap(
         env_image: Optional environment render to show alongside.
         env_mission: Optional mission string.
         min_visits: Minimum number of visits to include a position.
+        P_a: Optional reference marginal. If None, computed from routing_data (local).
+             Pass a pre-computed global P_a for KL_global.
 
     Returns:
         matplotlib Figure object
     """
-    result = compute_empirical_entropy(routing_data, min_visits=min_visits)
+    result = compute_empirical_entropy(routing_data, min_visits=min_visits, P_a=P_a)
     KL_s = result['KL_s']
     include_mask = result['include_mask']
 
@@ -1570,8 +1589,9 @@ def plot_kl_heatmap(
 
     cmap = plt.cm.inferno.copy()
     cmap.set_bad(color=UNVISITED_COLOR)
+    kl_type = "global" if P_a is not None else "local"
     im = axes[plot_idx].imshow(kl_grid, origin='upper', cmap=cmap)
-    axes[plot_idx].set_title(f"KL Divergence KL(π̂(·|s) ∥ P(a)) [bits]\n(min_visits={min_visits})")
+    axes[plot_idx].set_title(f"KL Divergence KL(π̂(·|s) ∥ $P_{{\\mathrm{{{kl_type}}}}}(a)$) [bits]\n(min_visits={min_visits})")
     axes[plot_idx].set_xlabel("X")
     axes[plot_idx].set_ylabel("Y")
     axes[plot_idx].set_xticks(np.arange(-0.5, grid_width, 1), minor=True)
@@ -1592,12 +1612,13 @@ def plot_grouped_kl_heatmap(
     room_env_images: dict = None,
     max_groups: int = 25,
     min_visits: int = 5,
+    P_a: np.ndarray = None,
 ) -> plt.Figure:
     """
     Grouped KL divergence heatmap: one row per group.
 
-    Each row shows KL(pi_hat(.|s) || P(a)) in bits per position,
-    computed independently within each group. Uses inferno colormap.
+    Each row shows KL(pi_hat(.|s) || P_a_ref) in bits per position.
+    Uses inferno colormap.
 
     Args:
         routing_data: List of sample dicts with 'position' and 'action' keys.
@@ -1607,14 +1628,18 @@ def plot_grouped_kl_heatmap(
         room_env_images: Optional dict mapping group_key -> (image, mission).
         max_groups: Maximum number of groups to display.
         min_visits: Minimum visits to include a position.
+        P_a: Optional reference marginal. If None, each group uses its own local P(a).
+             Pass a pre-computed global P_a for KL_global.
 
     Returns:
         matplotlib Figure object
     """
+    kl_type = "global" if P_a is not None else "local"
+    compute_fn = partial(_compute_group_kl, P_a=P_a) if P_a is not None else _compute_group_kl
     return _plot_grouped_entropy_heatmap(
         routing_data,
-        compute_entropy_fn=_compute_group_kl,
-        title="KL Divergence KL(π̂(·|s) ∥ P(a)) [bits]",
+        compute_entropy_fn=compute_fn,
+        title=f"KL Divergence KL(π̂(·|s) ∥ $P_{{\\mathrm{{{kl_type}}}}}(a)$) [bits]",
         group_by=group_by,
         env_image=env_image,
         env_mission=env_mission,
