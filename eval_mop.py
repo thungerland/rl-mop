@@ -91,7 +91,8 @@ class EvalVectorEnv:
         self.envs = []
         self.obs_list = []
         self.missions = []
-        self.door_positions = []  # (x, y) of door per env, None if no door
+        self.door_positions = []      # (x, y) of first door per env, None if no door (used for dist_to_door / door_unlocked flag)
+        self.all_door_positions = []  # list of all door (x, y) per env (used for t_unlocked tracking)
 
         # Language encoding (same as training)
         self.tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
@@ -109,7 +110,8 @@ class EvalVectorEnv:
 
         # Metrics
         self.episode_steps = np.zeros(num_envs, dtype=int)
-        self.t_unlocked = [None] * num_envs  # first t_step when door_unlocked=1, per env
+        self.t_unlocked = [None] * num_envs        # first t_step when any door becomes unlocked, per env
+        self.unlocked_door_pos = [None] * num_envs  # position of the door that triggered t_unlocked
         self.t_pick = [None] * num_envs  # first t_step when carrying=1, per env
         self.t_drop = [None] * num_envs  # first t_step when carrying drops to 0 post-unlock
         self.total_episodes = 0
@@ -135,6 +137,7 @@ class EvalVectorEnv:
             obs = self._add_carrying_flag(env, obs)
             self.envs.append(env)
             self.door_positions.append(self._get_door_position(env))
+            self.all_door_positions.append(self._get_all_door_positions(env))
             obs = self._add_door_unlocked_flag(i, obs)
 
             self.obs_list.append(obs)
@@ -163,6 +166,27 @@ class EvalVectorEnv:
                 if cell is not None and cell.type == 'door':
                     return (i, j)
         return None
+
+    def _get_all_door_positions(self, env) -> list:
+        """Find all door (x, y) positions in the grid."""
+        base = getattr(env, "unwrapped", env)
+        positions = []
+        for j in range(base.grid.height):
+            for i in range(base.grid.width):
+                cell = base.grid.get(i, j)
+                if cell is not None and cell.type == 'door':
+                    positions.append((i, j))
+        return positions
+
+    def _get_next_locked_door(self, env_idx: int) -> tuple | None:
+        """Return the position of the first still-locked door for env_idx, or None if all unlocked."""
+        env = self.envs[env_idx]
+        base = getattr(env, "unwrapped", env)
+        for pos in self.all_door_positions[env_idx]:
+            cell = base.grid.get(*pos)
+            if cell is not None and getattr(cell, 'is_locked', False):
+                return pos  # this door is still locked — it's the next door goal
+        return None  # all doors are open
 
     def _add_door_unlocked_flag(self, env_idx: int, obs: dict) -> dict:
         """Add door_unlocked_flag=1 if the door at self.door_positions[env_idx] is no longer locked."""
@@ -319,6 +343,7 @@ class EvalVectorEnv:
             obs.pop('mission', None)
             obs = self._add_carrying_flag(env, obs)
             self.door_positions[i] = self._get_door_position(env)
+            self.all_door_positions[i] = self._get_all_door_positions(env)
             obs = self._add_door_unlocked_flag(i, obs)
 
             try:
@@ -333,6 +358,7 @@ class EvalVectorEnv:
             self.lang_embs[i] = self._encode_mission(mission)
             self.episode_steps[i] = 0
             self.t_unlocked[i] = None
+            self.unlocked_door_pos[i] = None
             self.t_pick[i] = None
             self.t_drop[i] = None
             self.expert_steps[i] = expert_steps
@@ -374,12 +400,13 @@ class EvalVectorEnv:
             obs = self._add_door_unlocked_flag(i, obs)
 
             if self.t_unlocked[i] is None:
-                door_pos = self.door_positions[i]
-                if door_pos is not None:
-                    base = getattr(env, "unwrapped", env)
+                base = getattr(env, "unwrapped", env)
+                for door_pos in self.all_door_positions[i]:
                     cell = base.grid.get(*door_pos)
-                    if cell is None or not getattr(cell, 'is_locked', False):
+                    if cell is None or getattr(cell, 'is_open', False):
                         self.t_unlocked[i] = self.episode_steps[i]
+                        self.unlocked_door_pos[i] = door_pos
+                        break
 
             if self.t_pick[i] is None:
                 carrying = int(obs.get('carrying_flag', 0))
@@ -483,6 +510,12 @@ def evaluate(policy, vec_env, num_episodes, device):
     # Storage for routing data: (position, routing_weights per layer, lpc, env_context)
     routing_data = []
 
+    # Per-env list of routing_data indices for the current in-progress episode.
+    # Used to backfill dist_to_door once we know which door was opened first (multi-door tasks).
+    pending_episode_records = [[] for _ in range(num_envs)]
+    # Snapshot of t_unlocked before each step — used to detect first-unlock transitions.
+    prev_t_unlocked = [None] * num_envs
+
     # Run until we have enough episodes
     vec_env.reset()
     episodes_completed = 0
@@ -537,11 +570,17 @@ def evaluate(policy, vec_env, num_episodes, device):
                 t_drop = vec_env.t_drop[i]
 
                 pos_x, pos_y = pos
-                door_pos = vec_env.door_positions[i]
-                dist_to_door = (
-                    float(np.sqrt((pos_x - door_pos[0])**2 + (pos_y - door_pos[1])**2))
-                    if door_pos is not None else None
-                )
+                multi_door = len(vec_env.all_door_positions[i]) > 1
+                if multi_door and vec_env.t_unlocked[i] is None:
+                    # Pre-first-unlock in a multi-door task: don't know which door is first yet.
+                    # Will be backfilled once t_unlocked is set.
+                    dist_to_door = None
+                else:
+                    door_pos = vec_env._get_next_locked_door(i) if multi_door else vec_env.door_positions[i]
+                    dist_to_door = (
+                        float(np.sqrt((pos_x - door_pos[0])**2 + (pos_y - door_pos[1])**2))
+                        if door_pos is not None else None
+                    )
                 target_pos = env_contexts[i].get('target_pos')
                 dist_to_target = (
                     float(np.sqrt((pos_x - target_pos[0])**2 + (pos_y - target_pos[1])**2))
@@ -576,13 +615,35 @@ def evaluate(policy, vec_env, num_episodes, device):
                     'dist_to_key': dist_to_key,
                     'dist_to_target': dist_to_target,
                 })
+                if len(vec_env.all_door_positions[i]) > 1:
+                    pending_episode_records[i].append(len(routing_data) - 1)
 
             # Sample actions (greedy for eval)
             actions = logits.argmax(dim=-1).cpu().numpy()
 
+            # Snapshot t_unlocked before stepping (to detect first-unlock transitions)
+            for i in range(num_envs):
+                prev_t_unlocked[i] = vec_env.t_unlocked[i]
+
             # Step environments
             _, terminated, truncated = vec_env.step(actions)
             episode_over = terminated | truncated
+
+            # Backfill dist_to_door for multi-door envs where t_unlocked was just set.
+            # Now that we know which door was opened first, fill in the pre-unlock records.
+            for i in range(num_envs):
+                if (prev_t_unlocked[i] is None
+                        and vec_env.t_unlocked[i] is not None
+                        and len(vec_env.all_door_positions[i]) > 1):
+                    first_door = vec_env.unlocked_door_pos[i]
+                    if first_door is not None:
+                        for idx in pending_episode_records[i]:
+                            rec = routing_data[idx]
+                            if rec['dist_to_door'] is None:
+                                rx, ry = rec['position']
+                                rec['dist_to_door'] = float(
+                                    np.sqrt((rx - first_door[0])**2 + (ry - first_door[1])**2)
+                                )
 
             # Reset hidden states for finished episodes
             dones_tensor = torch.from_numpy(episode_over).to(device)
@@ -593,6 +654,7 @@ def evaluate(policy, vec_env, num_episodes, device):
             for i in range(num_envs):
                 if episode_over[i]:
                     env_contexts[i] = vec_env._extract_env_context(vec_env.envs[i])
+                    pending_episode_records[i] = []  # episode done — reset backfill tracking
 
             # Count completed episodes
             new_episodes = episode_over.sum()
