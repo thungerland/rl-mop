@@ -255,6 +255,8 @@ if __name__ == '__main__':
 
     cache_path = pathlib.Path('evaluation_cache') / task_id / f'trial_{trial}' / 'routing_data.json'
     if not cache_path.exists():
+        cache_path = pathlib.Path('evaluation_cache') / task_id / task_id / f'trial_{trial}' / 'routing_data.json'
+    if not cache_path.exists():
         print(f"Cache not found: {cache_path}")
         sys.exit(1)
 
@@ -314,40 +316,57 @@ if __name__ == '__main__':
     has_new_fields = any(s.get('t_step') is not None for s in routing_data[:10])
     if has_new_fields:
         from plotting_utils import compute_empirical_entropy
-        emp = compute_empirical_entropy(routing_data)
-        H_s_masked  = {pos: v for pos, v in emp['H_s'].items()  if emp['include_mask'][pos]}
-        KL_s_masked = {pos: v for pos, v in emp['KL_s'].items() if emp['include_mask'][pos]}
+
+        def _phase_emp(phase):
+            """Compute H_s/KL_s masked dicts from phase-filtered data."""
+            pd = list(_filter_by_phase(routing_data, phase))
+            emp = compute_empirical_entropy(pd)
+            H  = {pos: v for pos, v in emp['H_s'].items()  if emp['include_mask'][pos]}
+            KL = {pos: v for pos, v in emp['KL_s'].items() if emp['include_mask'][pos]}
+            return pd, H, KL
 
         print()
         print("Distance correlations [2-phase: pre/post unlock]")
-        for dist_field, phase, label, fn, extra in [
-            ('dist_to_door',   'pre_unlock',  'lpc     vs dist_to_door   [pre-unlock ]', per_timestep_lpc_dist_correlation,     (routing_data,)),
-            ('dist_to_door',   'pre_unlock',  'entropy vs dist_to_door   [pre-unlock ]', per_timestep_entropy_dist_correlation,  (routing_data, H_s_masked)),
-            ('dist_to_door',   'pre_unlock',  'kl      vs dist_to_door   [pre-unlock ]', per_timestep_kl_dist_correlation,       (routing_data, KL_s_masked)),
-            ('dist_to_target', 'post_unlock', 'lpc     vs dist_to_target [post-unlock]', per_timestep_lpc_dist_correlation,     (routing_data,)),
-            ('dist_to_target', 'post_unlock', 'entropy vs dist_to_target [post-unlock]', per_timestep_entropy_dist_correlation,  (routing_data, H_s_masked)),
-            ('dist_to_target', 'post_unlock', 'kl      vs dist_to_target [post-unlock]', per_timestep_kl_dist_correlation,       (routing_data, KL_s_masked)),
+        for dist_field, phase, label in [
+            ('dist_to_door',   'pre_unlock',  'lpc     vs dist_to_door   [pre-unlock ]'),
+            ('dist_to_door',   'pre_unlock',  'entropy vs dist_to_door   [pre-unlock ]'),
+            ('dist_to_door',   'pre_unlock',  'kl      vs dist_to_door   [pre-unlock ]'),
+            ('dist_to_target', 'post_unlock', 'lpc     vs dist_to_target [post-unlock]'),
+            ('dist_to_target', 'post_unlock', 'entropy vs dist_to_target [post-unlock]'),
+            ('dist_to_target', 'post_unlock', 'kl      vs dist_to_target [post-unlock]'),
         ]:
-            res = fn(*extra, dist_field, phase)
+            pd, H, KL = _phase_emp(phase)
+            if label.startswith('lpc'):
+                res = per_timestep_lpc_dist_correlation(pd, dist_field)
+            elif label.startswith('entropy'):
+                res = per_timestep_entropy_dist_correlation(pd, H, dist_field)
+            else:
+                res = per_timestep_kl_dist_correlation(pd, KL, dist_field)
             print(f"  {label}  r={res['r']:+.4f}  p={res['p']:.4e}  n={res['n']}")
 
     has_t_pick = any(s.get('dist_to_key') is not None for s in routing_data[:10])
     if has_new_fields and has_t_pick:
         print()
         print("Distance correlations [4-phase: pre-key / with-key pre-unlock / with-key post-unlock / post-unlock post-key]")
-        for dist_field, phase, label, fn, extra in [
-            ('dist_to_key',    'pre_key',             'lpc     vs dist_to_key    [pre-key                ]', per_timestep_lpc_dist_correlation,    (routing_data,)),
-            ('dist_to_key',    'pre_key',             'entropy vs dist_to_key    [pre-key                ]', per_timestep_entropy_dist_correlation, (routing_data, H_s_masked)),
-            ('dist_to_key',    'pre_key',             'kl      vs dist_to_key    [pre-key                ]', per_timestep_kl_dist_correlation,      (routing_data, KL_s_masked)),
-            ('dist_to_door',   'post_key_pre_unlock', 'lpc     vs dist_to_door   [with-key/pre-unlock    ]', per_timestep_lpc_dist_correlation,    (routing_data,)),
-            ('dist_to_door',   'post_key_pre_unlock', 'entropy vs dist_to_door   [with-key/pre-unlock    ]', per_timestep_entropy_dist_correlation, (routing_data, H_s_masked)),
-            ('dist_to_door',   'post_key_pre_unlock', 'kl      vs dist_to_door   [with-key/pre-unlock    ]', per_timestep_kl_dist_correlation,      (routing_data, KL_s_masked)),
-            ('dist_to_target', 'with_key_post_unlock','lpc     vs dist_to_target [with-key/post-unlock   ]', per_timestep_lpc_dist_correlation,    (routing_data,)),
-            ('dist_to_target', 'with_key_post_unlock','entropy vs dist_to_target [with-key/post-unlock   ]', per_timestep_entropy_dist_correlation, (routing_data, H_s_masked)),
-            ('dist_to_target', 'with_key_post_unlock','kl      vs dist_to_target [with-key/post-unlock   ]', per_timestep_kl_dist_correlation,      (routing_data, KL_s_masked)),
-            ('dist_to_target', 'post_unlock_post_key','lpc     vs dist_to_target [post-unlock/post-key   ]', per_timestep_lpc_dist_correlation,    (routing_data,)),
-            ('dist_to_target', 'post_unlock_post_key','entropy vs dist_to_target [post-unlock/post-key   ]', per_timestep_entropy_dist_correlation, (routing_data, H_s_masked)),
-            ('dist_to_target', 'post_unlock_post_key','kl      vs dist_to_target [post-unlock/post-key   ]', per_timestep_kl_dist_correlation,      (routing_data, KL_s_masked)),
+        for dist_field, phase, label in [
+            ('dist_to_key',    'pre_key',             'lpc     vs dist_to_key    [pre-key                ]'),
+            ('dist_to_key',    'pre_key',             'entropy vs dist_to_key    [pre-key                ]'),
+            ('dist_to_key',    'pre_key',             'kl      vs dist_to_key    [pre-key                ]'),
+            ('dist_to_door',   'post_key_pre_unlock', 'lpc     vs dist_to_door   [with-key/pre-unlock    ]'),
+            ('dist_to_door',   'post_key_pre_unlock', 'entropy vs dist_to_door   [with-key/pre-unlock    ]'),
+            ('dist_to_door',   'post_key_pre_unlock', 'kl      vs dist_to_door   [with-key/pre-unlock    ]'),
+            ('dist_to_target', 'with_key_post_unlock','lpc     vs dist_to_target [with-key/post-unlock   ]'),
+            ('dist_to_target', 'with_key_post_unlock','entropy vs dist_to_target [with-key/post-unlock   ]'),
+            ('dist_to_target', 'with_key_post_unlock','kl      vs dist_to_target [with-key/post-unlock   ]'),
+            ('dist_to_target', 'post_unlock_post_key','lpc     vs dist_to_target [post-unlock/post-key   ]'),
+            ('dist_to_target', 'post_unlock_post_key','entropy vs dist_to_target [post-unlock/post-key   ]'),
+            ('dist_to_target', 'post_unlock_post_key','kl      vs dist_to_target [post-unlock/post-key   ]'),
         ]:
-            res = fn(*extra, dist_field, phase)
+            pd, H, KL = _phase_emp(phase)
+            if label.startswith('lpc'):
+                res = per_timestep_lpc_dist_correlation(pd, dist_field)
+            elif label.startswith('entropy'):
+                res = per_timestep_entropy_dist_correlation(pd, H, dist_field)
+            else:
+                res = per_timestep_kl_dist_correlation(pd, KL, dist_field)
             print(f"  {label}  r={res['r']:+.4f}  p={res['p']:.4e}  n={res['n']}")
