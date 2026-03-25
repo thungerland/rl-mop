@@ -566,7 +566,14 @@ def group_routing_data(routing_data: list, group_by: str) -> dict[tuple, list]:
         if group_by == 'carrying_phase':
             key = (sample.get('carrying', 0),)
         elif group_by == 'door_unlocked_phase':
-            key = (sample.get('door_unlocked', 0),)
+            t_step = sample.get('t_step')
+            t_unlocked = sample.get('t_unlocked')
+            if t_step is None:
+                continue
+            if t_unlocked is None or t_step < t_unlocked:
+                key = (0,)   # pre-unlock / pre-open
+            else:
+                key = (1,)   # post-unlock / post-open
         elif group_by == 'door_location':
             doors = env_context.get('doors')
             if not doors:
