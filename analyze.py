@@ -97,6 +97,8 @@ if plot_type not in ALL_TYPES:
 # ── 2. Load cache ─────────────────────────────────────────────────────────────
 cache_path = pathlib.Path(f"evaluation_cache/{task_id}/trial_{trial}/routing_data.json")
 if not cache_path.exists():
+    cache_path = pathlib.Path(f"evaluation_cache/{task_id}/{task_id}/trial_{trial}/routing_data.json")
+if not cache_path.exists():
     print(f"Cache not found: {cache_path}")
     sys.exit(1)
 
