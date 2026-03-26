@@ -25,7 +25,7 @@ def _(mo):
 
 @app.cell
 def _(BabyAIBot, gym, seed_number, tile_size_slider):
-    _env = gym.make("BabyAI-GoToObjDoor-v0", max_steps=200)
+    _env = gym.make("BabyAI-Pickup-v0", max_steps=200)
     _env = _env.unwrapped
     _obs, _ = _env.reset(seed=int(seed_number.value))
     mission = _obs["mission"]
@@ -82,7 +82,7 @@ def _(Image, frames, mission, mo, seed_number):
 def _(Image, frames, mo, save_button, seed_number):
     from pathlib import Path as _Path
     mo.stop(not save_button.value)
-    _task_id = "BabyAI-GoToObjDoor-v0"
+    _task_id = "BabyAI-Pickup-v0"
     _out_dir = _Path("trajectories")
     _out_dir.mkdir(exist_ok=True)
     _path = _out_dir / f"trajectory_{_task_id}_seed{int(seed_number.value)}.gif"
