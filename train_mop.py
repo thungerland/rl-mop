@@ -431,15 +431,15 @@ def train_unroll_moe(policy, optimizer, vec_env, h, unroll_len, device, lpc_alph
 
         # Forward MoE policy for one step
         lang_embs = vec_env.lang_embs
-        logits, h, routing_info = policy(obs_batch, lang_embs, h, return_routing_info=use_lpc)
+        logits, h, routing_info = policy(obs_batch, lang_embs, h, return_routing_info=True)
 
         # Compute the supervised loss between policy and expert
         step_loss = F.cross_entropy(logits, expert_actions)
 
-        # Compute LPC if enabled
+        # Always compute LPC for logging; only add to loss if alpha > 0
+        step_lpc = compute_lpc(routing_info, policy.layer_expert_sizes)
+        total_lpc += step_lpc.item()
         if use_lpc:
-            step_lpc = compute_lpc(routing_info, policy.layer_expert_sizes)
-            total_lpc += step_lpc.item()
             step_loss = step_loss + lpc_alpha * step_lpc
 
         total_loss += step_loss
@@ -470,7 +470,7 @@ def train_unroll_moe(policy, optimizer, vec_env, h, unroll_len, device, lpc_alph
     optimizer.step()
 
     avg_acc = total_correct / max(total_count, 1)
-    avg_lpc = total_lpc / unroll_len if use_lpc else 0.0
+    avg_lpc = total_lpc / unroll_len
 
     # Detach hidden states for next unroll
     h = detach_hidden(h)
@@ -733,8 +733,7 @@ def main():
                 "episodes/total": vec_env.total_episodes,
                 "episodes/bot_plan_failures": vec_env.bot_plan_failures,
             }
-            if lpc_alpha > 0.0:
-                log_dict["lpc"] = avg_lpc
+            log_dict["lpc"] = avg_lpc
             wandb.log(log_dict)
 
             print(
