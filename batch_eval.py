@@ -26,17 +26,21 @@ from eval_mop import load_checkpoint, evaluate, EvalVectorEnv
 
 
 def discover_checkpoints(checkpoint_dir: str, task_filter: str = None, trial_filter: int = None,
-                         seed_filter: int = None, update_filter: int = None) -> list[Path]:
-    """Scan checkpoint directory for all numbered checkpoint_<update>.pt files.
+                         seed_filter: int = None, update_filter: int = None,
+                         final_only: bool = False) -> list[Path]:
+    """Scan checkpoint directory for checkpoint files.
 
     Handles two path layouts:
       Old: task_id/trial_N/checkpoint_final.pt          (3 parts, legacy)
       New: task_id/trial_N/seed_S/checkpoint_<U>.pt     (4 parts)
 
-    checkpoint_final.pt is a naming alias saved at end of training — it is skipped
-    here to avoid double-counting (the numbered file e.g. checkpoint_5000.pt is canonical).
-    Old-style checkpoint_final.pt (no seed dir, 3-part path) is still included for
-    backward compatibility, treated as update=None.
+    By default, checkpoint_final.pt aliases in the new layout are skipped to avoid
+    double-counting (the numbered file is canonical, update is read from the filename).
+
+    With final_only=True, only checkpoint_final.pt files are returned. The actual
+    update number is read from the checkpoint config at eval time, so it correctly
+    reflects whatever step training ended on rather than being fixed to num_updates.
+    Old-style 3-part checkpoint_final.pt is always included (backward compat).
     """
     checkpoints = []
     base = Path(checkpoint_dir)
@@ -45,7 +49,9 @@ def discover_checkpoints(checkpoint_dir: str, task_filter: str = None, trial_fil
         print(f"Warning: Checkpoint directory '{checkpoint_dir}' does not exist.")
         return checkpoints
 
-    for checkpoint_path in base.glob("**/checkpoint_*.pt"):
+    glob_pattern = "**/checkpoint_final.pt" if final_only else "**/checkpoint_*.pt"
+
+    for checkpoint_path in base.glob(glob_pattern):
         parts = checkpoint_path.relative_to(base).parts
 
         if len(parts) == 3:
@@ -68,13 +74,15 @@ def discover_checkpoints(checkpoint_dir: str, task_filter: str = None, trial_fil
         name = filename.replace('.pt', '')      # "checkpoint_500" or "checkpoint_final"
         update_str = name.split('_', 1)[1]      # "500" or "final"
         if update_str == 'final':
-            if len(parts) == 4:
-                # New-style final alias: skip — numbered version is canonical
+            if len(parts) == 4 and not final_only:
+                # New-style final alias in default mode: skip — numbered file is canonical
                 continue
-            else:
-                # Old-style checkpoint_final.pt: include for backward compat
-                update = None
+            # Otherwise (final_only=True, or old 3-part): include; update resolved from config
+            update = None
         else:
+            if final_only:
+                # Should not happen with checkpoint_final.pt glob, but be safe
+                continue
             try:
                 update = int(update_str)
             except ValueError:
@@ -270,6 +278,8 @@ def main():
                         help='Filter by seed number')
     parser.add_argument('--update', type=int, default=None,
                         help='Filter by update/checkpoint step (e.g. 1500)')
+    parser.add_argument('--final-only', action='store_true',
+                        help='Evaluate only checkpoint_final.pt files (actual last update, not fixed num_updates)')
     parser.add_argument('--force', action='store_true',
                         help='Re-evaluate all checkpoints (ignore existing results)')
     parser.add_argument('--skip_routing', action='store_true',
@@ -284,7 +294,7 @@ def main():
     # Discover checkpoints
     checkpoint_dir = Path(args.checkpoint_dir)
     checkpoints = discover_checkpoints(args.checkpoint_dir, args.task, args.trial,
-                                       args.seed, args.update)
+                                       args.seed, args.update, args.final_only)
     print(f"Found {len(checkpoints)} checkpoint(s) in {args.checkpoint_dir}")
 
     if not checkpoints:
