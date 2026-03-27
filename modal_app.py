@@ -99,6 +99,7 @@ def eval_run(
     trial: int = None,
     seed: int = None,
     update: int = None,
+    final_only: bool = False,
     skip_routing: bool = False,
 ):
     """
@@ -128,6 +129,8 @@ def eval_run(
         cmd.extend(["--seed", str(seed)])
     if update is not None:
         cmd.extend(["--update", str(update)])
+    if final_only:
+        cmd.append("--final-only")
     if skip_routing:
         cmd.append("--skip_routing")
 
@@ -206,6 +209,7 @@ def eval_parallel(
     trial: int = None,
     seed: int = None,
     update: int = None,
+    final_only: bool = False,
     skip_routing: bool = False,
 ):
     """
@@ -245,8 +249,9 @@ def eval_parallel(
         print(f"Error: '{checkpoint_base}' directory not found. Download checkpoints first.")
         return
 
+    glob_pattern = "**/checkpoint_final.pt" if final_only else "**/checkpoint_*.pt"
     local_checkpoints = []  # list of (task_id, trial_num, seed_num, update_num)
-    for checkpoint_path in checkpoint_base.glob("**/checkpoint_*.pt"):
+    for checkpoint_path in checkpoint_base.glob(glob_pattern):
         parts = checkpoint_path.relative_to(checkpoint_base).parts
 
         if len(parts) == 3:
@@ -268,11 +273,13 @@ def eval_parallel(
         name = filename.replace(".pt", "")
         update_str = name.split("_", 1)[1]
         if update_str == "final":
-            if len(parts) == 4:
-                continue  # skip alias in new layout — numbered file is canonical
-            else:
-                update_num = None  # old-style: include for backward compat
+            if len(parts) == 4 and not final_only:
+                continue  # skip alias in default mode — numbered file is canonical
+            # final_only mode or old 3-part: include; update resolved from config at eval time
+            update_num = None
         else:
+            if final_only:
+                continue
             try:
                 update_num = int(update_str)
             except ValueError:
@@ -297,7 +304,7 @@ def eval_parallel(
 
         local_checkpoints.append((task_id_p, trial_num, seed_num, update_num))
 
-    local_checkpoints.sort()
+    local_checkpoints.sort(key=lambda x: (x[0], x[1], x[2] if x[2] is not None else -1, x[3] if x[3] is not None else -1))
 
     # Load evaluated keys from CSV using (task_id, trial, seed, update) columns
     evaluated = set()
@@ -354,6 +361,7 @@ def eval_parallel(
             trial=trial_num,
             seed=seed_num,
             update=update_num,
+            final_only=final_only,
             skip_routing=skip_routing,
         )
         jobs.append((task_id_p, trial_num, seed_num, update_num, job))
