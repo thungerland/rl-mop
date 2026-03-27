@@ -488,6 +488,10 @@ def load_checkpoint(checkpoint_path, device):
     # Extract lang_proj weights if saved (for backwards compatibility)
     lang_proj_state_dict = checkpoint.get('lang_proj_state_dict', None)
 
+    # Ensure 'update' is available in config (old checkpoints store it as a top-level key)
+    if 'update' not in config and 'update' in checkpoint:
+        config['update'] = checkpoint['update']
+
     return policy, config, lang_proj_state_dict
 
 

@@ -62,13 +62,21 @@ from plotting_utils import (
 from eval_mop import _first_target_pos
 
 # ── 1. Parse args ─────────────────────────────────────────────────────────────
-if len(sys.argv) < 3:
-    print("Usage: python analyze.py <task_id> <trial> [plot_type]")
-    sys.exit(1)
+import argparse as _argparse
+_parser = _argparse.ArgumentParser(
+    description='Visualize routing data for a single checkpoint.',
+    usage='python analyze.py <task_id> <trial> [plot_type] [--seed S] [--update U]'
+)
+_parser.add_argument('task_id')
+_parser.add_argument('trial', type=int)
+_parser.add_argument('plot_type', nargs='?', default='overall')
+_parser.add_argument('--seed', type=int, default=None, help='Seed number (for seeded checkpoints)')
+_parser.add_argument('--update', type=int, default=None, help='Training update step (e.g. 1500)')
+_args = _parser.parse_args()
 
-task_id = sys.argv[1]
-trial = int(sys.argv[2])
-plot_type = sys.argv[3] if len(sys.argv) > 3 else "overall"
+task_id = _args.task_id
+trial = _args.trial
+plot_type = _args.plot_type
 
 GROUPED_ROUTING_TYPES = {
     "by_starting_room",
@@ -106,8 +114,15 @@ if plot_type not in ALL_TYPES:
     sys.exit(1)
 
 # ── 2. Load cache ─────────────────────────────────────────────────────────────
-cache_path = pathlib.Path(f"evaluation_cache/{task_id}/trial_{trial}/routing_data.json")
-if not cache_path.exists():
+_base = pathlib.Path('evaluation_cache') / task_id / f'trial_{trial}'
+if _args.seed is not None:
+    _base = _base / f'seed_{_args.seed}'
+if _args.update is not None:
+    _base = _base / f'update_{_args.update}'
+cache_path = _base / 'routing_data.json'
+
+# Legacy fallback: old flat layout without seed/update dirs
+if not cache_path.exists() and _args.seed is None and _args.update is None:
     cache_path = pathlib.Path(f"evaluation_cache/{task_id}/{task_id}/trial_{trial}/routing_data.json")
 if not cache_path.exists():
     print(f"Cache not found: {cache_path}")
@@ -357,6 +372,10 @@ elif plot_type == "cell_action_distribution":
 
 # ── 5. Preview & optionally save ──────────────────────────────────────────────
 out_dir = pathlib.Path("plots") / task_id / f"trial_{trial}"
+if _args.seed is not None:
+    out_dir = out_dir / f"seed_{_args.seed}"
+if _args.update is not None:
+    out_dir = out_dir / f"update_{_args.update}"
 
 filename_map = {
     "overall":                       "routing_heatmap.png",

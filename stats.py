@@ -345,16 +345,32 @@ def grouped_spatial_entropy_lpc_correlation(routing_data: list, group_by: str) -
 
 
 if __name__ == '__main__':
-    if len(sys.argv) < 3:
-        print("Usage: python stats.py <task_id> <trial> [group_by]")
-        sys.exit(1)
+    import argparse
+    parser = argparse.ArgumentParser(
+        description='Compute spatial and per-timestep correlations on routing data.',
+        usage='python stats.py <task_id> <trial> [group_by] [--seed S] [--update U]'
+    )
+    parser.add_argument('task_id')
+    parser.add_argument('trial', type=int)
+    parser.add_argument('group_by', nargs='?', default=None)
+    parser.add_argument('--seed', type=int, default=None, help='Seed number (for seeded checkpoints)')
+    parser.add_argument('--update', type=int, default=None, help='Training update step (e.g. 1500)')
+    args = parser.parse_args()
 
-    task_id = sys.argv[1]
-    trial = int(sys.argv[2])
-    group_by = sys.argv[3] if len(sys.argv) > 3 else None
+    task_id = args.task_id
+    trial = args.trial
+    group_by = args.group_by
 
-    cache_path = pathlib.Path('evaluation_cache') / task_id / f'trial_{trial}' / 'routing_data.json'
-    if not cache_path.exists():
+    # Build cache path: support new seed/update layout and old flat layout
+    base = pathlib.Path('evaluation_cache') / task_id / f'trial_{trial}'
+    if args.seed is not None:
+        base = base / f'seed_{args.seed}'
+    if args.update is not None:
+        base = base / f'update_{args.update}'
+    cache_path = base / 'routing_data.json'
+
+    # Legacy fallback: old flat layout without seed/update dirs
+    if not cache_path.exists() and args.seed is None and args.update is None:
         cache_path = pathlib.Path('evaluation_cache') / task_id / task_id / f'trial_{trial}' / 'routing_data.json'
     if not cache_path.exists():
         print(f"Cache not found: {cache_path}")

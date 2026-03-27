@@ -25,8 +25,19 @@ from tqdm import tqdm
 from eval_mop import load_checkpoint, evaluate, EvalVectorEnv
 
 
-def discover_checkpoints(checkpoint_dir: str, task_filter: str = None, trial_filter: int = None) -> list[Path]:
-    """Scan checkpoint directory for all checkpoint_final.pt files."""
+def discover_checkpoints(checkpoint_dir: str, task_filter: str = None, trial_filter: int = None,
+                         seed_filter: int = None, update_filter: int = None) -> list[Path]:
+    """Scan checkpoint directory for all numbered checkpoint_<update>.pt files.
+
+    Handles two path layouts:
+      Old: task_id/trial_N/checkpoint_final.pt          (3 parts, legacy)
+      New: task_id/trial_N/seed_S/checkpoint_<U>.pt     (4 parts)
+
+    checkpoint_final.pt is a naming alias saved at end of training — it is skipped
+    here to avoid double-counting (the numbered file e.g. checkpoint_5000.pt is canonical).
+    Old-style checkpoint_final.pt (no seed dir, 3-part path) is still included for
+    backward compatibility, treated as update=None.
+    """
     checkpoints = []
     base = Path(checkpoint_dir)
 
@@ -34,10 +45,41 @@ def discover_checkpoints(checkpoint_dir: str, task_filter: str = None, trial_fil
         print(f"Warning: Checkpoint directory '{checkpoint_dir}' does not exist.")
         return checkpoints
 
-    for checkpoint_path in base.glob("**/checkpoint_final.pt"):
-        # Extract task_id and trial from path structure: task_id/trial_N/checkpoint_final.pt
-        task_id = checkpoint_path.parent.parent.name
-        trial_str = checkpoint_path.parent.name  # "trial_0"
+    for checkpoint_path in base.glob("**/checkpoint_*.pt"):
+        parts = checkpoint_path.relative_to(base).parts
+
+        if len(parts) == 3:
+            # Old layout: task_id/trial_N/checkpoint_final.pt
+            task_id, trial_str, filename = parts
+            seed = None
+        elif len(parts) == 4:
+            # New layout: task_id/trial_N/seed_S/checkpoint_<U>.pt
+            task_id, trial_str, seed_str, filename = parts
+            try:
+                seed = int(seed_str.split('_')[1])
+            except (IndexError, ValueError):
+                print(f"Warning: Could not parse seed from {checkpoint_path}, skipping.")
+                continue
+        else:
+            print(f"Warning: Unexpected path depth {checkpoint_path}, skipping.")
+            continue
+
+        # Parse update from filename
+        name = filename.replace('.pt', '')      # "checkpoint_500" or "checkpoint_final"
+        update_str = name.split('_', 1)[1]      # "500" or "final"
+        if update_str == 'final':
+            if len(parts) == 4:
+                # New-style final alias: skip — numbered version is canonical
+                continue
+            else:
+                # Old-style checkpoint_final.pt: include for backward compat
+                update = None
+        else:
+            try:
+                update = int(update_str)
+            except ValueError:
+                print(f"Warning: Could not parse update from {checkpoint_path}, skipping.")
+                continue
 
         try:
             trial = int(trial_str.split('_')[1])
@@ -49,6 +91,10 @@ def discover_checkpoints(checkpoint_dir: str, task_filter: str = None, trial_fil
         if task_filter and task_id != task_filter:
             continue
         if trial_filter is not None and trial != trial_filter:
+            continue
+        if seed_filter is not None and seed != seed_filter:
+            continue
+        if update_filter is not None and update != update_filter:
             continue
 
         checkpoints.append(checkpoint_path)
@@ -63,7 +109,7 @@ def load_existing_results(results_path: str) -> pd.DataFrame:
 
     # Return empty DataFrame with expected columns
     return pd.DataFrame(columns=[
-        'checkpoint_path', 'task_id', 'trial', 'num_episodes',
+        'checkpoint_path', 'task_id', 'trial', 'seed', 'update', 'num_episodes',
         'success_rate', 'path_ratio', 'mean_lpc', 'bot_plan_failures',
         'num_updates', 'unroll_len', 'lr', 'lpc_alpha',
         'expert_hidden_sizes', 'intermediate_dim', 'router_hidden_size',
@@ -79,12 +125,15 @@ def checkpoint_already_evaluated(checkpoint_path: Path, results_df: pd.DataFrame
     return rel_path in results_df['checkpoint_path'].values
 
 
-def build_result_row(checkpoint_path: Path, metrics: dict, config: dict, num_episodes: int, base_dir: Path) -> dict:
+def build_result_row(checkpoint_path: Path, metrics: dict, config: dict,
+                     num_episodes: int, base_dir: Path) -> dict:
     """Build a result row dictionary from evaluation results and config."""
     return {
         'checkpoint_path': str(checkpoint_path.relative_to(base_dir.parent)),
         'task_id': config['task_id'],
         'trial': int(config['trial']),
+        'seed': int(config['seed']) if config.get('seed') is not None else None,
+        'update': int(config['update']) if config.get('update') is not None else None,
         'num_episodes': int(num_episodes),
         'success_rate': float(metrics['success_rate']),
         'path_ratio': float(metrics['path_ratio']),
@@ -109,8 +158,13 @@ def save_routing_data(routing_data: list, checkpoint_path: Path, config: dict,
     """Save routing data to JSON file for visualization caching."""
     task_id = config['task_id']
     trial = config['trial']
+    seed = config.get('seed')
+    update_val = config.get('update')
 
     cache_path = Path(cache_dir) / task_id / f"trial_{trial}"
+    if seed is not None:
+        cache_path = cache_path / f"seed_{seed}"
+    cache_path = cache_path / (f"update_{update_val}" if update_val is not None else "update_unknown")
     cache_path.mkdir(parents=True, exist_ok=True)
 
     # Deduplicate env_context: store once per unique episode layout, reference by index
@@ -212,6 +266,10 @@ def main():
                         help='Filter by task_id (e.g., BabyAI-GoToRedBall-v0)')
     parser.add_argument('--trial', type=int, default=None,
                         help='Filter by trial number')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='Filter by seed number')
+    parser.add_argument('--update', type=int, default=None,
+                        help='Filter by update/checkpoint step (e.g. 1500)')
     parser.add_argument('--force', action='store_true',
                         help='Re-evaluate all checkpoints (ignore existing results)')
     parser.add_argument('--skip_routing', action='store_true',
@@ -225,7 +283,8 @@ def main():
 
     # Discover checkpoints
     checkpoint_dir = Path(args.checkpoint_dir)
-    checkpoints = discover_checkpoints(args.checkpoint_dir, args.task, args.trial)
+    checkpoints = discover_checkpoints(args.checkpoint_dir, args.task, args.trial,
+                                       args.seed, args.update)
     print(f"Found {len(checkpoints)} checkpoint(s) in {args.checkpoint_dir}")
 
     if not checkpoints:
@@ -283,8 +342,11 @@ def main():
                 save_routing_data(routing_data, checkpoint_path, config,
                                   metrics, args.num_episodes, args.cache_dir)
 
+
             # Print summary
-            tqdm.write(f"  {task_id}/trial_{config['trial']}: "
+            seed_str = f"/seed_{config['seed']}" if config.get('seed') is not None else ""
+            update_str = f"@{config['update']}" if config.get('update') is not None else ""
+            tqdm.write(f"  {task_id}/trial_{config['trial']}{seed_str}{update_str}: "
                       f"success={metrics['success_rate']:.1%}, "
                       f"path_ratio={metrics['path_ratio']:.2f}, "
                       f"lpc={metrics['mean_lpc']:.1f}, "
@@ -317,7 +379,7 @@ def main():
     print("\n" + "=" * 80)
     print("EVALUATION SUMMARY")
     print("=" * 80)
-    summary_cols = ['task_id', 'trial', 'success_rate', 'path_ratio', 'mean_lpc']
+    summary_cols = ['task_id', 'trial', 'seed', 'update', 'success_rate', 'path_ratio', 'mean_lpc']
     if new_rows:
         summary_df = pd.DataFrame(new_rows)[summary_cols]
         print(summary_df.to_string(index=False))

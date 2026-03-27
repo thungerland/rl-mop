@@ -478,17 +478,18 @@ def train_unroll_moe(policy, optimizer, vec_env, h, unroll_len, device, lpc_alph
     return h, avg_loss.item(), avg_acc, avg_lpc
 
 
-def save_checkpoint(policy, optimizer, config, update, checkpoint_dir, task_id, trial, lang_proj_state_dict):
+def save_checkpoint(policy, optimizer, config, update, checkpoint_dir, task_id, trial,
+                    lang_proj_state_dict, seed=None, is_final=False):
     """
     Save model checkpoint to disk.
 
-    Structure: checkpoint_dir/task_id/trial_N/checkpoint_final.pt
+    Structure: checkpoint_dir/task_id/trial_N/[seed_S/]checkpoint_<update>.pt
+    At end of training also writes checkpoint_final.pt as a fixed-name alias.
     """
-    # Create directory structure
     save_dir = Path(checkpoint_dir) / task_id / f"trial_{trial}"
+    if seed is not None:
+        save_dir = save_dir / f"seed_{seed}"
     save_dir.mkdir(parents=True, exist_ok=True)
-
-    checkpoint_path = save_dir / "checkpoint_final.pt"
 
     checkpoint = {
         'policy_state_dict': policy.state_dict(),
@@ -498,8 +499,15 @@ def save_checkpoint(policy, optimizer, config, update, checkpoint_dir, task_id, 
         'lang_proj_state_dict': lang_proj_state_dict,
     }
 
+    checkpoint_path = save_dir / f"checkpoint_{update}.pt"
     torch.save(checkpoint, checkpoint_path)
     print(f"Checkpoint saved to {checkpoint_path}")
+
+    if is_final:
+        final_path = save_dir / "checkpoint_final.pt"
+        torch.save(checkpoint, final_path)
+        print(f"Final alias saved to {final_path}")
+
     return checkpoint_path
 
 
@@ -602,6 +610,8 @@ def main():
     # Checkpoint arguments
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints',
                         help='Directory to save checkpoints')
+    parser.add_argument('--checkpoint_interval', type=int, default=None,
+                        help='Save a checkpoint every N updates (e.g. 250). None = only save at end.')
 
     args = parser.parse_args()
 
@@ -620,8 +630,9 @@ def main():
     input_dim = config['input_dim']
     lang_dim = config['lang_dim']
 
-    # Set random seed if provided
+    # Set random seed if provided and store in config
     if args.seed is not None:
+        config['seed'] = int(args.seed)
         torch.manual_seed(args.seed)
         np.random.seed(args.seed)
         random.seed(args.seed)
@@ -657,9 +668,11 @@ def main():
     h = policy.init_hidden(num_envs, device)
 
     # wandb init
+    seed = config.get('seed')
+    run_name = f"{task_id}-t{trial}-s{seed}" if seed is not None else f"{task_id}-t{trial}"
     wandb.init(
         project=wandb_project,
-        name=f"{task_id}-t{trial}",
+        name=run_name,
         config=config,
         reinit=True
     )
@@ -733,9 +746,16 @@ def main():
                 f"total_episodes: {vec_env.total_episodes}"
             )
 
+        # Periodic checkpoint (if interval set and not the final update)
+        if args.checkpoint_interval and update % args.checkpoint_interval == 0 and update < num_updates:
+            config['update'] = update
+            save_checkpoint(policy, optimizer, config, update, args.checkpoint_dir, task_id, trial,
+                            vec_env.lang_proj.state_dict(), seed=config.get('seed'), is_final=False)
+
     # Save final checkpoint
-    checkpoint_dir = args.checkpoint_dir
-    save_checkpoint(policy, optimizer, config, num_updates, checkpoint_dir, task_id, trial, vec_env.lang_proj.state_dict())
+    config['update'] = num_updates
+    save_checkpoint(policy, optimizer, config, num_updates, args.checkpoint_dir, task_id, trial,
+                    vec_env.lang_proj.state_dict(), seed=config.get('seed'), is_final=True)
 
     wandb.finish()
 
