@@ -400,6 +400,248 @@ def eval_parallel(
     print("  modal volume get rl-mop-eval /eval_output/evaluation_cache ./evaluation_cache")
 
 
+@app.function(
+    image=image,
+    volumes={EVAL_OUTPUT_PATH: eval_volume},
+    timeout=60 * 60 * 3,  # 3 hours — no GPU needed, just CPU + volume I/O
+)
+def extract_seed_metrics(
+    task_id: str = "BabyAI-UnlockPickup-v0",
+    trials: list = None,  # default: [20, 21, 22, 23, 26]
+    output_csv: str = "/eval_output/eval_metrics_unlockpickup.csv",
+):
+    """
+    Read every routing_data.json for the given task/trials from the eval volume,
+    compute all per-seed quantities in one pass, and write a compact CSV.
+
+    Per-row quantities:
+      - Scalar metrics: task_id, trial, seed, update, lpc_alpha,
+                        success_rate, path_ratio, mean_lpc
+      - policy_complexity: I(S;A) = sum_s P(s)*KL(pi_hat(.|s)||P_a), include_mask applied
+      - Per-phase correlation r/p values for all (phase, corr_type) pairs used by
+        seed_agg_plots: lpc_entropy, lpc_kl_local, lpc_kl_global × 4 key_phases
+
+    After running, download with:
+        modal volume get rl-mop-eval /eval_output/eval_metrics_unlockpickup.csv ./eval_metrics_unlockpickup.csv
+
+    Usage:
+        modal run modal_app.py::run_extract_seed_metrics
+        modal run modal_app.py::run_extract_seed_metrics --task-id BabyAI-UnlockPickup-v0 --trials "[20,21,22]"
+    """
+    import json
+    import pathlib
+    import sys
+    import numpy as np
+    import pandas as pd
+
+    sys.path.insert(0, "/root/project")
+    from plotting_utils import build_routing_data_tuples, compute_empirical_entropy
+    from corr_plots import compute_corr, PHASE_LIST, _SUBPLOT_LINES
+    from stats import _filter_by_phase
+
+    if trials is None:
+        trials = [20, 21, 22, 23, 26]
+
+    # Load hyperparams from evaluation_results.csv on the volume
+    results_csv = pathlib.Path(EVAL_OUTPUT_PATH) / "evaluation_results.csv"
+    if not results_csv.exists():
+        print(f"[error] {results_csv} not found on volume")
+        return
+
+    eval_df = pd.read_csv(results_csv)
+    eval_df = eval_df[eval_df["task_id"] == task_id]
+
+    # Build lookup: (trial, seed, update) -> row dict of hyperparams
+    def _key(trial, seed, update):
+        return (int(trial), int(seed) if seed is not None else None, int(update) if update is not None else None)
+
+    hyperparam_map = {}
+    for _, row in eval_df.iterrows():
+        seed_val = None if pd.isna(row.get("seed")) else int(row["seed"])
+        update_val = None if pd.isna(row.get("update")) else int(row["update"])
+        hyperparam_map[_key(int(row["trial"]), seed_val, update_val)] = row.to_dict()
+
+    # Phases and corr types
+    phases = PHASE_LIST["key_phase"]
+    corr_types = [spec["corr"] for spec in _SUBPLOT_LINES]  # lpc_entropy, lpc_kl_local, lpc_kl_global
+
+    cache_base = pathlib.Path(EVAL_OUTPUT_PATH) / "evaluation_cache" / task_id
+    rows = []
+
+    for trial in trials:
+        trial_dir = cache_base / f"trial_{trial}"
+        if not trial_dir.exists():
+            print(f"[skip] trial_{trial}: directory not found")
+            continue
+
+        # Discover seed/update combos
+        seed_dirs = sorted(trial_dir.glob("seed_*"))
+        if not seed_dirs:
+            print(f"[skip] trial_{trial}: no seed_* directories found")
+            continue
+
+        for seed_dir in seed_dirs:
+            try:
+                seed_num = int(seed_dir.name.split("_")[1])
+            except (IndexError, ValueError):
+                print(f"[warn] Could not parse seed from {seed_dir.name}, skipping")
+                continue
+
+            # Find the largest update dir (same logic as discover_seeded_caches)
+            update_dirs = []
+            for upd_dir in seed_dir.glob("update_*"):
+                if not upd_dir.is_dir():
+                    continue
+                try:
+                    upd_num = int(upd_dir.name.split("_")[1])
+                except (IndexError, ValueError):
+                    continue
+                candidate = upd_dir / "routing_data.json"
+                if candidate.exists():
+                    update_dirs.append((upd_num, candidate))
+
+            # Sort by update number (ascending) to process ALL checkpoints for trial 20
+            update_dirs.sort(key=lambda x: x[0])
+
+            for upd_num, cache_path in update_dirs:
+                label = f"trial={trial} seed={seed_num} update={upd_num}"
+                print(f"  Processing {label}...", end=" ", flush=True)
+
+                try:
+                    with open(cache_path) as f:
+                        cache = json.load(f)
+                    routing_data = build_routing_data_tuples(cache)
+                except Exception as e:
+                    print(f"ERROR loading: {e}")
+                    continue
+
+                print(f"{len(routing_data)} timesteps", end=" ", flush=True)
+
+                # Scalar metrics from cache
+                metrics = cache.get("metrics", {})
+                success_rate = metrics.get("success_rate", float("nan"))
+                path_ratio = metrics.get("path_ratio", float("nan"))
+                mean_lpc = metrics.get("mean_lpc", float("nan"))
+
+                # lpc_alpha from hyperparam_map (try to match, fallback to eval_df)
+                hp = hyperparam_map.get(_key(trial, seed_num, upd_num))
+                if hp is None:
+                    # Try matching without update (for final-only entries)
+                    trial_rows = eval_df[(eval_df["trial"] == trial)]
+                    lpc_alpha = float(trial_rows["lpc_alpha"].iloc[0]) if not trial_rows.empty else float("nan")
+                else:
+                    lpc_alpha = float(hp.get("lpc_alpha", float("nan")))
+
+                # Policy complexity: compute_empirical_entropy over all timesteps
+                emp = compute_empirical_entropy(routing_data, alpha=0.5, min_visits=5)
+                KL_s = emp["KL_s"]
+                P_s = emp["P_s"]
+                include_mask = emp["include_mask"]
+                global_P_a = emp["P_a"]
+
+                policy_complexity = float(sum(
+                    P_s[s] * KL_s[s] for s in KL_s if include_mask.get(s, False)
+                ))
+
+                # Per-phase correlation r/p
+                row = {
+                    "task_id": task_id,
+                    "trial": trial,
+                    "seed": seed_num,
+                    "update": upd_num,
+                    "lpc_alpha": lpc_alpha,
+                    "success_rate": success_rate,
+                    "path_ratio": path_ratio,
+                    "mean_lpc": mean_lpc,
+                    "policy_complexity": policy_complexity,
+                }
+
+                for phase in phases:
+                    for corr_type in corr_types:
+                        try:
+                            res = compute_corr(
+                                routing_data, corr_type, phase,
+                                dist_field=None, global_P_a=global_P_a,
+                            )
+                            row[f"r_{phase}_{corr_type}"] = res["r"]
+                            row[f"p_{phase}_{corr_type}"] = res["p"]
+                        except Exception as e:
+                            print(f"\n    [warn] {label} phase={phase} corr={corr_type}: {e}")
+                            row[f"r_{phase}_{corr_type}"] = float("nan")
+                            row[f"p_{phase}_{corr_type}"] = float("nan")
+
+                # Per-phase scalar metrics: I(S;A), H̄(A|S), mean LPC
+                # global_P_a used as KL reference for consistency across phases/alphas
+                for phase in phases:
+                    phase_data = list(_filter_by_phase(routing_data, phase))
+                    if not phase_data:
+                        row[f"policy_complexity_{phase}"] = float("nan")
+                        row[f"mean_entropy_{phase}"] = float("nan")
+                        row[f"mean_lpc_{phase}"] = float("nan")
+                        continue
+
+                    emp_phase = compute_empirical_entropy(
+                        phase_data, alpha=0.5, min_visits=5, P_a=global_P_a,
+                    )
+                    KL_s_p = emp_phase["KL_s"]
+                    H_s_p  = emp_phase["H_s"]
+                    P_s_p  = emp_phase["P_s"]
+                    mask_p = emp_phase["include_mask"]
+
+                    row[f"policy_complexity_{phase}"] = float(
+                        sum(P_s_p[s] * KL_s_p[s] for s in KL_s_p if mask_p.get(s, False))
+                    )
+                    row[f"mean_entropy_{phase}"] = float(
+                        sum(P_s_p[s] * H_s_p[s] for s in H_s_p if mask_p.get(s, False))
+                    )
+                    lpc_vals = [d["lpc"] for d in phase_data if d.get("lpc") is not None]
+                    row[f"mean_lpc_{phase}"] = float(np.mean(lpc_vals)) if lpc_vals else float("nan")
+
+                rows.append(row)
+                print("done")
+
+    if not rows:
+        print("[error] No rows collected — check that seeded caches exist on the volume.")
+        return
+
+    out_df = pd.DataFrame(rows)
+    out_df.to_csv(output_csv, index=False)
+    eval_volume.commit()
+    print(f"\nWrote {len(out_df)} rows to {output_csv}")
+    print("\nDownload with:")
+    print(f"  modal volume get rl-mop-eval {output_csv} ./{pathlib.Path(output_csv).name}")
+
+
+@app.local_entrypoint()
+def run_extract_seed_metrics(
+    task_id: str = "BabyAI-UnlockPickup-v0",
+    trials: str = "20,21,22,23,26",
+    output_csv: str = "/eval_output/eval_metrics_unlockpickup.csv",
+):
+    """
+    Launch extract_seed_metrics on Modal.
+
+    Usage:
+        modal run modal_app.py::run_extract_seed_metrics
+        modal run modal_app.py::run_extract_seed_metrics --trials "20,21,22"
+    """
+    trials_list = [int(t.strip()) for t in trials.split(",")]
+    print(f"Launching extract_seed_metrics on Modal:")
+    print(f"  task_id: {task_id}")
+    print(f"  trials:  {trials_list}")
+    print(f"  output:  {output_csv}")
+
+    result = extract_seed_metrics.remote(
+        task_id=task_id,
+        trials=trials_list,
+        output_csv=output_csv,
+    )
+
+    from pathlib import Path
+    print("\nDone. Download the CSV with:")
+    print(f"  modal volume get rl-mop-eval {output_csv} ./{Path(output_csv).name}")
+
+
 @app.local_entrypoint()
 def main_seeds(
     task_ids: str,
