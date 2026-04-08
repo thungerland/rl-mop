@@ -209,3 +209,46 @@ Interactive notebook for exploring routing heatmaps across all cached tasks.
 marimo run logit_viz.py
 ```
 Interactive notebook for action frequency and entropy heatmap plots across all cached tasks. Requires a v3 cache file (produced by `batch_eval.py` without `--skip_routing`).
+
+**Seed-aggregated correlation plots (primary analysis tool for multi-seed runs):**
+
+Produces a figure with one subplot per phase. Each subplot shows three lines across alpha values:
+H(A|S) vs LPC, KL-local vs LPC, KL-global vs LPC. Shaded bands = SEM across seeds.
+Faint dots = individual seed r-values. Also prints a summary table with mean r, SEM,
+p-value (one-sample t-test on Fisher z-values), n_seeds, and % seeds with positive r.
+
+Each trial corresponds to one alpha value; each trial has multiple seeds. Seeds are the
+unit of replication — episodes are not pooled across seeds.
+
+```bash
+# Standard usage: pass all trials with seeded caches, specify the update checkpoint
+python seed_agg_plots.py BabyAI-UnlockPickup-v0 --trials 20,21,22,23,26 --update 5000
+
+# Save without prompting
+python seed_agg_plots.py BabyAI-UnlockPickup-v0 --trials 20,21,22,23,26 --update 5000 --save
+
+# Use latest available checkpoint per seed (omit --update)
+python seed_agg_plots.py BabyAI-UnlockPickup-v0 --trials 20,21,22,23,26
+```
+
+Output: `corr_plots/<task_id>/<task_id>_seed_agg_phase_subplots.png`
+
+Reads seeded caches from: `evaluation_cache/<task_id>/trial_N/seed_S/update_U/routing_data.json`
+
+**Correlation plots (single trial per alpha, no seed aggregation):**
+
+Useful for exploratory analysis or tasks without seeded runs.
+
+```bash
+# Phase-subplot figure: one subplot per phase, x=alpha, three metric lines
+python corr_plots.py BabyAI-UnlockPickup-v0 --mode phase_subplots
+
+# 2D scatter: r(H, LPC) vs r(KL-local, LPC) coloured by alpha, shaped by phase
+python corr_plots.py BabyAI-UnlockPickup-v0 --mode scatter_panel
+
+# Single-metric line plots
+python corr_plots.py BabyAI-UnlockPickup-v0 --mode alpha --corr lpc_entropy
+python corr_plots.py BabyAI-UnlockPickup-v0 --mode phase --corr lpc_dist
+```
+
+Output: `corr_plots/<task_id>/`. Prompts to save after display.

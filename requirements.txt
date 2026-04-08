@@ -8,4 +8,7 @@ tqdm
 pyyaml
 pillow
 pandas
+matplotlib
+seaborn
+scipy
 
