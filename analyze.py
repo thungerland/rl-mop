@@ -72,6 +72,10 @@ _parser.add_argument('trial', type=int)
 _parser.add_argument('plot_type', nargs='?', default='overall')
 _parser.add_argument('--seed', type=int, default=None, help='Seed number (for seeded checkpoints)')
 _parser.add_argument('--update', type=int, default=None, help='Training update step (e.g. 1500)')
+_parser.add_argument('--cache_dir', type=str, default='evaluation_cache',
+                     help='Root directory for routing data cache (default: evaluation_cache)')
+_parser.add_argument('--plots_dir', type=str, default='plots',
+                     help='Root directory for output plots (default: plots)')
 _args = _parser.parse_args()
 
 task_id = _args.task_id
@@ -114,7 +118,7 @@ if plot_type not in ALL_TYPES:
     sys.exit(1)
 
 # ── 2. Load cache ─────────────────────────────────────────────────────────────
-_base = pathlib.Path('evaluation_cache') / task_id / f'trial_{trial}'
+_base = pathlib.Path(_args.cache_dir) / task_id / f'trial_{trial}'
 if _args.seed is not None:
     _base = _base / f'seed_{_args.seed}'
 if _args.update is not None:
@@ -123,7 +127,7 @@ cache_path = _base / 'routing_data.json'
 
 # Legacy fallback: old flat layout without seed/update dirs
 if not cache_path.exists() and _args.seed is None and _args.update is None:
-    cache_path = pathlib.Path(f"evaluation_cache/{task_id}/{task_id}/trial_{trial}/routing_data.json")
+    cache_path = pathlib.Path(_args.cache_dir) / task_id / task_id / f"trial_{trial}" / "routing_data.json"
 if not cache_path.exists():
     print(f"Cache not found: {cache_path}")
     sys.exit(1)
@@ -371,7 +375,7 @@ elif plot_type == "cell_action_distribution":
     fig = plot_cell_action_distribution(routing_data)
 
 # ── 5. Preview & optionally save ──────────────────────────────────────────────
-out_dir = pathlib.Path("plots") / task_id / f"trial_{trial}"
+out_dir = pathlib.Path(_args.plots_dir) / task_id / f"trial_{trial}"
 if _args.seed is not None:
     out_dir = out_dir / f"seed_{_args.seed}"
 if _args.update is not None:

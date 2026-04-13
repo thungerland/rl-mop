@@ -10,6 +10,10 @@ CHECKPOINTS_PATH = "/checkpoints"
 eval_volume = modal.Volume.from_name("rl-mop-eval", create_if_missing=True)
 EVAL_OUTPUT_PATH = "/eval_output"
 
+# Separate volume for normalised-loss training runs — keeps them isolated from originals
+checkpoints_normalised_volume = modal.Volume.from_name("rl-mop-normalised", create_if_missing=True)
+CHECKPOINTS_NORMALISED_PATH = "/checkpoints_normalised"
+
 image = (
     modal.Image.debian_slim(python_version="3.10")
     .apt_install("git")
@@ -33,7 +37,10 @@ image = (
     gpu="T4",
     timeout=60 * 60 * 24, # 24 hours which is the max allowed by Modal for GPU functions - use checkpoints and reentry to handle longer experiments
     secrets=[modal.Secret.from_name("wandb-secret")],
-    volumes={CHECKPOINTS_PATH: checkpoints_volume},
+    volumes={
+        CHECKPOINTS_PATH: checkpoints_volume,
+        CHECKPOINTS_NORMALISED_PATH: checkpoints_normalised_volume,
+    },
 )
 def train_run(
     task_id: str,
@@ -41,6 +48,7 @@ def train_run(
     script: str = "train.py",
     config_path: str = "config.yaml",
     extra_args: str = None,
+    checkpoint_dir: str = "/checkpoints",
 ):
     """
     Run a single training experiment with specified parameters.
@@ -66,7 +74,7 @@ def train_run(
         "--config", f"/root/project/{config_path}",
         "--task_id", task_id,
         "--trial", str(trial),
-        "--checkpoint_dir", "/checkpoints",
+        "--checkpoint_dir", checkpoint_dir,
     ]
 
     # Add any extra arguments
@@ -76,8 +84,11 @@ def train_run(
     # Run the training script
     result = subprocess.run(cmd, capture_output=False, text=True)
 
-    # Commit the volume to persist checkpoints
-    checkpoints_volume.commit()
+    # Commit only the volume that was actually written to
+    if checkpoint_dir == CHECKPOINTS_NORMALISED_PATH:
+        checkpoints_normalised_volume.commit()
+    else:
+        checkpoints_volume.commit()
 
     return result.returncode
 
@@ -89,6 +100,7 @@ def train_run(
     secrets=[modal.Secret.from_name("wandb-secret")],
     volumes={
         CHECKPOINTS_PATH: checkpoints_volume,
+        CHECKPOINTS_NORMALISED_PATH: checkpoints_normalised_volume,
         EVAL_OUTPUT_PATH: eval_volume,
     },
 )
@@ -101,10 +113,18 @@ def eval_run(
     update: int = None,
     final_only: bool = False,
     skip_routing: bool = False,
+    checkpoint_dir: str = CHECKPOINTS_PATH,
+    cache_dir: str = f"{EVAL_OUTPUT_PATH}/evaluation_cache",
+    results_path: str = f"{EVAL_OUTPUT_PATH}/evaluation_results.csv",
 ):
     """
-    Run batch_eval.py on Modal, reading checkpoints from the rl-mop volume
-    and writing evaluation_cache/ and evaluation_results.csv to the rl-mop-eval volume.
+    Run batch_eval.py on Modal, reading checkpoints from a volume and
+    writing evaluation_cache/ and evaluation_results.csv to the rl-mop-eval volume.
+
+    For normalised runs pass:
+        checkpoint_dir=CHECKPOINTS_NORMALISED_PATH  ("/checkpoints_normalised")
+        cache_dir="/eval_output/evaluation_cache_normalised"
+        results_path="/eval_output/evaluation_results_normalised.csv"
     """
     import sys
     import subprocess
@@ -113,9 +133,9 @@ def eval_run(
     cmd = [
         sys.executable,
         "/root/project/batch_eval.py",
-        "--checkpoint_dir", CHECKPOINTS_PATH,
-        "--cache_dir", f"{EVAL_OUTPUT_PATH}/evaluation_cache",
-        "--results_path", f"{EVAL_OUTPUT_PATH}/evaluation_results.csv",
+        "--checkpoint_dir", checkpoint_dir,
+        "--cache_dir", cache_dir,
+        "--results_path", results_path,
         "--num_episodes", str(num_episodes),
     ]
 
@@ -149,6 +169,9 @@ def eval_main(
     task: str = None,
     trial: int = None,
     skip_routing: bool = False,
+    checkpoint_dir: str = CHECKPOINTS_PATH,
+    cache_dir: str = f"{EVAL_OUTPUT_PATH}/evaluation_cache",
+    results_path: str = f"{EVAL_OUTPUT_PATH}/evaluation_results.csv",
 ):
     """
     Launch batch evaluation on Modal and print download instructions on completion.
@@ -157,14 +180,11 @@ def eval_main(
         # Evaluate all checkpoints (1000 episodes each)
         modal run modal_app.py::eval_main
 
-        # Force re-evaluation
-        modal run modal_app.py::eval_main --force
-
-        # Custom episode count
-        modal run modal_app.py::eval_main --num-episodes 500
-
-        # Evaluate a single task
-        modal run modal_app.py::eval_main --task "BabyAI-UnlockPickup-v0"
+        # Normalised runs:
+        modal run modal_app.py::eval_main \
+          --checkpoint-dir "/checkpoints_normalised" \
+          --cache-dir "/eval_output/evaluation_cache_normalised" \
+          --results-path "/eval_output/evaluation_results_normalised.csv"
 
         # Then download results locally
         modal volume get rl-mop-eval /eval_output/evaluation_cache ./evaluation_cache
@@ -173,6 +193,9 @@ def eval_main(
     print(f"Launching batch evaluation on Modal:")
     print(f"  Episodes per checkpoint: {num_episodes}")
     print(f"  Force re-evaluate: {force}")
+    print(f"  Checkpoint dir: {checkpoint_dir}")
+    print(f"  Cache dir: {cache_dir}")
+    print(f"  Results path: {results_path}")
     if task:
         print(f"  Task filter: {task}")
     if trial is not None:
@@ -186,15 +209,18 @@ def eval_main(
         task=task,
         trial=trial,
         skip_routing=skip_routing,
+        checkpoint_dir=checkpoint_dir,
+        cache_dir=cache_dir,
+        results_path=results_path,
     )
 
     print("\nJob queued. Waiting for completion...")
     try:
         return_code = job.get()
         if return_code == 0:
-            print("\n✓ Evaluation complete. Download results with:")
-            print("  modal volume get rl-mop-eval /eval_output/evaluation_cache ./evaluation_cache")
-            print("  modal volume get rl-mop-eval /eval_output/evaluation_results.csv ./evaluation_results.csv")
+            print(f"\n✓ Evaluation complete. Download results with:")
+            print(f"  modal volume get rl-mop-eval {cache_dir} ./{cache_dir.split('/')[-1]}")
+            print(f"  modal volume get rl-mop-eval {results_path} ./{results_path.split('/')[-1]}")
         else:
             print(f"\n✗ Evaluation failed (exit code {return_code}).")
     except Exception as e:
@@ -211,30 +237,30 @@ def eval_parallel(
     update: int = None,
     final_only: bool = False,
     skip_routing: bool = False,
+    checkpoint_base_local: str = "modal_checkpoints",
+    checkpoint_dir: str = CHECKPOINTS_PATH,
+    cache_dir: str = f"{EVAL_OUTPUT_PATH}/evaluation_cache",
+    results_path: str = f"{EVAL_OUTPUT_PATH}/evaluation_results.csv",
+    results_path_local: str = "evaluation_results.csv",
 ):
     """
     Discover unevaluated checkpoints locally and launch one Modal eval_run job
     per missing checkpoint in parallel.
 
-    Compares modal_checkpoints/ against evaluation_results.csv using
-    (task_id, trial, seed, update) as the canonical key to correctly handle the
-    path prefix difference between local modal_checkpoints/ and Modal's /checkpoints/.
-
-    Supports two checkpoint layouts:
-      Old: task_id/trial_N/checkpoint_final.pt
-      New: task_id/trial_N/seed_S/checkpoint_<U>.pt
-
-    checkpoint_final.pt aliases are skipped (numbered files are canonical).
+    Compares a local checkpoints folder against a local results CSV using
+    (task_id, trial, seed, update) as the canonical key.
 
     Usage examples:
         # Evaluate all missing checkpoints (1000 episodes each)
         modal run modal_app.py::eval_parallel
 
-        # Force re-evaluate everything
-        modal run modal_app.py::eval_parallel --force
-
-        # Only evaluate a specific task/trial/seed/update slice
-        modal run modal_app.py::eval_parallel --task "BabyAI-UnlockPickup-v0" --trial 20 --update 1500
+        # Normalised runs:
+        modal run modal_app.py::eval_parallel \
+          --checkpoint-base-local "modal_checkpoints_normalised" \
+          --checkpoint-dir "/checkpoints_normalised" \
+          --cache-dir "/eval_output/evaluation_cache_normalised" \
+          --results-path "/eval_output/evaluation_results_normalised.csv" \
+          --results-path-local "evaluation_results_normalised.csv"
 
         # After completion, download results:
         modal volume get rl-mop-eval /eval_output/evaluation_results.csv ./evaluation_results.csv
@@ -244,7 +270,7 @@ def eval_parallel(
     from pathlib import Path
 
     # Discover all local checkpoints
-    checkpoint_base = Path("modal_checkpoints")
+    checkpoint_base = Path(checkpoint_base_local)
     if not checkpoint_base.exists():
         print(f"Error: '{checkpoint_base}' directory not found. Download checkpoints first.")
         return
@@ -308,7 +334,7 @@ def eval_parallel(
 
     # Load evaluated keys from CSV using (task_id, trial, seed, update) columns
     evaluated = set()
-    csv_path = Path("evaluation_results.csv")
+    csv_path = Path(results_path_local)
     if csv_path.exists():
         with open(csv_path) as f:
             reader = csv.DictReader(f)
@@ -363,6 +389,9 @@ def eval_parallel(
             update=update_num,
             final_only=final_only,
             skip_routing=skip_routing,
+            checkpoint_dir=checkpoint_dir,
+            cache_dir=cache_dir,
+            results_path=results_path,
         )
         jobs.append((task_id_p, trial_num, seed_num, update_num, job))
 
@@ -396,8 +425,8 @@ def eval_parallel(
             print(f"  - {label}")
 
     print("\nDownload results with:")
-    print("  modal volume get rl-mop-eval /eval_output/evaluation_results.csv ./evaluation_results.csv")
-    print("  modal volume get rl-mop-eval /eval_output/evaluation_cache ./evaluation_cache")
+    print(f"  modal volume get rl-mop-eval {results_path} ./{results_path.split('/')[-1]}")
+    print(f"  modal volume get rl-mop-eval {cache_dir} ./{cache_dir.split('/')[-1]}")
 
 
 @app.function(
@@ -409,6 +438,7 @@ def extract_seed_metrics(
     task_id: str = "BabyAI-UnlockPickup-v0",
     trials: list = None,  # default: [20, 21, 22, 23, 26]
     output_csv: str = "/eval_output/eval_metrics_unlockpickup.csv",
+    cache_dir: str = "/eval_output/evaluation_cache",
 ):
     """
     Read every routing_data.json for the given task/trials from the eval volume,
@@ -465,7 +495,7 @@ def extract_seed_metrics(
     phases = PHASE_LIST["key_phase"]
     corr_types = [spec["corr"] for spec in _SUBPLOT_LINES]  # lpc_entropy, lpc_kl_local, lpc_kl_global
 
-    cache_base = pathlib.Path(EVAL_OUTPUT_PATH) / "evaluation_cache" / task_id
+    cache_base = pathlib.Path(cache_dir) / task_id
     rows = []
 
     for trial in trials:
@@ -617,6 +647,7 @@ def run_extract_seed_metrics(
     task_id: str = "BabyAI-UnlockPickup-v0",
     trials: str = "20,21,22,23,26",
     output_csv: str = "/eval_output/eval_metrics_unlockpickup.csv",
+    cache_dir: str = "/eval_output/evaluation_cache",
 ):
     """
     Launch extract_seed_metrics on Modal.
@@ -624,17 +655,23 @@ def run_extract_seed_metrics(
     Usage:
         modal run modal_app.py::run_extract_seed_metrics
         modal run modal_app.py::run_extract_seed_metrics --trials "20,21,22"
+        # Normalised runs:
+        modal run modal_app.py::run_extract_seed_metrics \
+          --cache-dir "/eval_output/evaluation_cache_normalised" \
+          --output-csv "/eval_output/eval_metrics_unlockpickup_normalised.csv"
     """
     trials_list = [int(t.strip()) for t in trials.split(",")]
     print(f"Launching extract_seed_metrics on Modal:")
-    print(f"  task_id: {task_id}")
-    print(f"  trials:  {trials_list}")
-    print(f"  output:  {output_csv}")
+    print(f"  task_id:   {task_id}")
+    print(f"  trials:    {trials_list}")
+    print(f"  cache_dir: {cache_dir}")
+    print(f"  output:    {output_csv}")
 
     result = extract_seed_metrics.remote(
         task_id=task_id,
         trials=trials_list,
         output_csv=output_csv,
+        cache_dir=cache_dir,
     )
 
     from pathlib import Path
@@ -650,6 +687,7 @@ def main_seeds(
     script: str = "train_mop.py",
     extra_args: str = None,
     checkpoint_interval: int = None,
+    checkpoint_dir: str = "/checkpoints",
 ):
     """
     Launch training runs for every (task_id, trial, seed) combination in parallel.
@@ -685,6 +723,7 @@ def main_seeds(
         print(f"  Checkpoint interval: every {checkpoint_interval} updates")
     if extra_args:
         print(f"  Extra args: {extra_args}")
+    print(f"  Checkpoint dir: {checkpoint_dir}")
 
     jobs = []
     for task_id, trial, seed_val in iproduct(task_id_list, trial_list, seed_list):
@@ -697,6 +736,7 @@ def main_seeds(
             trial=trial,
             script=script,
             extra_args=run_extra,
+            checkpoint_dir=checkpoint_dir,
         )
         jobs.append((task_id, trial, seed_val, job))
 
@@ -719,6 +759,7 @@ def main(
     trials: str,
     script: str = "train_mop.py",
     extra_args: str = None,
+    checkpoint_dir: str = "/checkpoints",
 ):
     """
     Launch multiple training runs on Modal.
@@ -760,6 +801,7 @@ def main(
         print(f"  Extra args: {extra_args}")
     else:
         print(f"  Using config.yaml defaults")
+    print(f"  Checkpoint dir: {checkpoint_dir}")
 
     # Launch all runs in parallel using Modal
     # Each (task_id, trial) combination runs in a separate container
@@ -773,6 +815,7 @@ def main(
             trial=trial,
             script=script,
             extra_args=extra_args,
+            checkpoint_dir=checkpoint_dir,
         )
         jobs.append((task_id, trial, job))
 

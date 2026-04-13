@@ -355,6 +355,8 @@ if __name__ == '__main__':
     parser.add_argument('group_by', nargs='?', default=None)
     parser.add_argument('--seed', type=int, default=None, help='Seed number (for seeded checkpoints)')
     parser.add_argument('--update', type=int, default=None, help='Training update step (e.g. 1500)')
+    parser.add_argument('--cache_dir', type=str, default='evaluation_cache',
+                        help='Root directory for routing data cache (default: evaluation_cache)')
     args = parser.parse_args()
 
     task_id = args.task_id
@@ -362,7 +364,7 @@ if __name__ == '__main__':
     group_by = args.group_by
 
     # Build cache path: support new seed/update layout and old flat layout
-    base = pathlib.Path('evaluation_cache') / task_id / f'trial_{trial}'
+    base = pathlib.Path(args.cache_dir) / task_id / f'trial_{trial}'
     if args.seed is not None:
         base = base / f'seed_{args.seed}'
     if args.update is not None:
@@ -371,7 +373,7 @@ if __name__ == '__main__':
 
     # Legacy fallback: old flat layout without seed/update dirs
     if not cache_path.exists() and args.seed is None and args.update is None:
-        cache_path = pathlib.Path('evaluation_cache') / task_id / task_id / f'trial_{trial}' / 'routing_data.json'
+        cache_path = pathlib.Path(args.cache_dir) / task_id / task_id / f'trial_{trial}' / 'routing_data.json'
     if not cache_path.exists():
         print(f"Cache not found: {cache_path}")
         sys.exit(1)

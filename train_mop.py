@@ -390,7 +390,7 @@ def detach_hidden(h):
     return h_detached
 
 
-def train_unroll_moe(policy, optimizer, vec_env, h, unroll_len, device, lpc_alpha=0.0):
+def train_unroll_moe(policy, optimizer, vec_env, h, unroll_len, device, lpc_alpha=0.0, normalize_lpc=False):
     """
     One truncated-backprop through time (BPTT) unroll for MoE policy.
 
@@ -402,6 +402,7 @@ def train_unroll_moe(policy, optimizer, vec_env, h, unroll_len, device, lpc_alph
         unroll_len: int
         device: "cuda" or "cpu"
         lpc_alpha: float, weight for LPC regularization (0.0 = disabled)
+        normalize_lpc: bool, if True divide LPC penalty by task loss (paper eq. 2)
 
     Returns:
         h_new: updated hidden states after unroll (detached from graph)
@@ -440,7 +441,13 @@ def train_unroll_moe(policy, optimizer, vec_env, h, unroll_len, device, lpc_alph
         step_lpc = compute_lpc(routing_info, policy.layer_expert_sizes)
         total_lpc += step_lpc.item()
         if use_lpc:
-            step_loss = step_loss + lpc_alpha * step_lpc
+            _LPC_EPS = 1e-8
+            if normalize_lpc:
+                # Paper eq. 2: α·LPC / (L_response + ε)
+                # Gradients flow through the denominator, matching the reference implementation
+                step_loss = step_loss + lpc_alpha * step_lpc / (step_loss + _LPC_EPS)
+            else:
+                step_loss = step_loss + lpc_alpha * step_lpc
 
         total_loss += step_loss
 
@@ -549,6 +556,8 @@ def load_config(config_path, args):
         config['lpc_alpha'] = float(args.lpc_alpha)
     if args.max_steps is not None:
         config['max_steps'] = int(args.max_steps)
+    if args.normalize_lpc:
+        config['normalize_lpc'] = True
 
     # Ensure all numeric config values are the correct type
     config['trial'] = int(config['trial'])
@@ -569,6 +578,8 @@ def load_config(config_path, args):
         config['router_hidden_size'] = 64
     if 'lpc_alpha' not in config:
         config['lpc_alpha'] = 0.0
+    if 'normalize_lpc' not in config:
+        config['normalize_lpc'] = False
 
     return config
 
@@ -604,6 +615,9 @@ def main():
                         help='Router GRU hidden size')
     parser.add_argument('--lpc_alpha', type=float, default=None,
                         help='LPC regularization weight (0.0 = disabled)')
+    parser.add_argument('--normalize_lpc', action='store_true', default=False,
+                        help='Normalize LPC penalty by task loss (paper eq. 2): '
+                             'alpha * LPC / (L_response + 1e-8). Gradients flow through both terms.')
     parser.add_argument('--max_steps', type=int, default=None,
                         help='Max steps per episode (None = use environment default)')
 
@@ -691,7 +705,8 @@ def main():
             h,
             unroll_len,
             device,
-            lpc_alpha
+            lpc_alpha,
+            normalize_lpc=config.get('normalize_lpc', False),
         )
 
         # -------------------------
