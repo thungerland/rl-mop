@@ -439,6 +439,7 @@ def extract_seed_metrics(
     trials: list = None,  # default: [20, 21, 22, 23, 26]
     output_csv: str = "/eval_output/eval_metrics_unlockpickup.csv",
     cache_dir: str = "/eval_output/evaluation_cache",
+    phase_system: str = None,  # None = auto-detect from task_id via TASK_PHASE_SYSTEM
 ):
     """
     Read every routing_data.json for the given task/trials from the eval volume,
@@ -449,7 +450,10 @@ def extract_seed_metrics(
                         success_rate, path_ratio, mean_lpc
       - policy_complexity: I(S;A) = sum_s P(s)*KL(pi_hat(.|s)||P_a), include_mask applied
       - Per-phase correlation r/p values for all (phase, corr_type) pairs used by
-        seed_agg_plots: lpc_entropy, lpc_kl_local, lpc_kl_global × 4 key_phases
+        seed_agg_plots: lpc_entropy, lpc_kl_local, lpc_kl_global × phases
+
+    phase_system: 'key_phase' (UnlockPickup, 4 phases) or 'unlock_phase' (OpenTwoDoors, 2 phases).
+                  Defaults to auto-detect from task_id via TASK_PHASE_SYSTEM.
 
     After running, download with:
         modal volume get rl-mop-eval /eval_output/eval_metrics_unlockpickup.csv ./eval_metrics_unlockpickup.csv
@@ -457,6 +461,7 @@ def extract_seed_metrics(
     Usage:
         modal run modal_app.py::run_extract_seed_metrics
         modal run modal_app.py::run_extract_seed_metrics --task-id BabyAI-UnlockPickup-v0 --trials "[20,21,22]"
+        modal run modal_app.py::run_extract_seed_metrics --task-id BabyAI-OpenTwoDoors-v0 --trials "20,21,22,23,24,25,26" --output-csv "/eval_output/eval_metrics_opentwodoors.csv"
     """
     import json
     import pathlib
@@ -466,7 +471,7 @@ def extract_seed_metrics(
 
     sys.path.insert(0, "/root/project")
     from plotting_utils import build_routing_data_tuples, compute_empirical_entropy
-    from corr_plots import compute_corr, PHASE_LIST, _SUBPLOT_LINES
+    from corr_plots import compute_corr, PHASE_LIST, TASK_PHASE_SYSTEM, _SUBPLOT_LINES
     from stats import _filter_by_phase
 
     if trials is None:
@@ -492,7 +497,9 @@ def extract_seed_metrics(
         hyperparam_map[_key(int(row["trial"]), seed_val, update_val)] = row.to_dict()
 
     # Phases and corr types
-    phases = PHASE_LIST["key_phase"]
+    resolved_phase_system = phase_system or TASK_PHASE_SYSTEM.get(task_id, "key_phase")
+    phases = PHASE_LIST[resolved_phase_system]
+    print(f"  phase_system: {resolved_phase_system} → phases: {phases}")
     corr_types = [spec["corr"] for spec in _SUBPLOT_LINES]  # lpc_entropy, lpc_kl_local, lpc_kl_global
 
     cache_base = pathlib.Path(cache_dir) / task_id
@@ -648,6 +655,7 @@ def run_extract_seed_metrics(
     trials: str = "20,21,22,23,26",
     output_csv: str = "/eval_output/eval_metrics_unlockpickup.csv",
     cache_dir: str = "/eval_output/evaluation_cache",
+    phase_system: str = None,  # None = auto-detect from task_id
 ):
     """
     Launch extract_seed_metrics on Modal.
@@ -659,19 +667,26 @@ def run_extract_seed_metrics(
         modal run modal_app.py::run_extract_seed_metrics \
           --cache-dir "/eval_output/evaluation_cache_normalised" \
           --output-csv "/eval_output/eval_metrics_unlockpickup_normalised.csv"
+        # OpenTwoDoors:
+        modal run modal_app.py::run_extract_seed_metrics \
+          --task-id BabyAI-OpenTwoDoors-v0 \
+          --trials "20,21,22,23,24,25,26" \
+          --output-csv "/eval_output/eval_metrics_opentwodoors.csv"
     """
     trials_list = [int(t.strip()) for t in trials.split(",")]
     print(f"Launching extract_seed_metrics on Modal:")
-    print(f"  task_id:   {task_id}")
-    print(f"  trials:    {trials_list}")
-    print(f"  cache_dir: {cache_dir}")
-    print(f"  output:    {output_csv}")
+    print(f"  task_id:      {task_id}")
+    print(f"  trials:       {trials_list}")
+    print(f"  cache_dir:    {cache_dir}")
+    print(f"  output:       {output_csv}")
+    print(f"  phase_system: {phase_system or 'auto'}")
 
     result = extract_seed_metrics.remote(
         task_id=task_id,
         trials=trials_list,
         output_csv=output_csv,
         cache_dir=cache_dir,
+        phase_system=phase_system,
     )
 
     from pathlib import Path

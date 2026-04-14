@@ -50,22 +50,26 @@ from scipy import stats as scipy_stats
 # alpha=1e-3 excluded: success breaks down at that regularisation strength.
 ALPHA_ORDER = [0.0, 1e-6, 1e-5, 1e-4]
 
-PHASES = [
-    'pre_key',
-    'post_key_pre_unlock',
-    'with_key_post_unlock',
-    'post_unlock_post_key',
-]
+# Phases, labels, and colors are resolved at runtime from the task_id.
+# These module-level names are populated by _init_phases() called in main().
+PHASES = []
+PHASE_LABELS = {}
+PHASE_COLORS = []
 
-PHASE_LABELS = {
-    'pre_key':              'Pre-key',
-    'post_key_pre_unlock':  'With-key\n(pre-unlock)',
-    'with_key_post_unlock': 'With-key\n(post-unlock)',
-    'post_unlock_post_key': 'Post-unlock\n(post-key)',
-}
+# Full palette — first N entries are used depending on number of phases
+_ALL_PHASE_COLORS = ['#264653', '#2a9d8f', '#e76f51', '#e9c46a']
 
-# Same palette as metrics_vs_alpha_plots.py
-PHASE_COLORS = ['#264653', '#2a9d8f', '#e76f51', '#e9c46a']
+# Import phase metadata from corr_plots
+from corr_plots import PHASE_LIST, PHASE_LABELS as _CORR_PHASE_LABELS, TASK_PHASE_SYSTEM
+
+
+def _init_phases(task_id: str) -> None:
+    """Populate module-level PHASES, PHASE_LABELS, PHASE_COLORS for the given task."""
+    global PHASES, PHASE_LABELS, PHASE_COLORS
+    phase_system = TASK_PHASE_SYSTEM.get(task_id, 'key_phase')
+    PHASES = PHASE_LIST[phase_system]
+    PHASE_LABELS = {ph: _CORR_PHASE_LABELS[ph] for ph in PHASES}
+    PHASE_COLORS = _ALL_PHASE_COLORS[:len(PHASES)]
 
 # Viridis samples for coloring scatter points by lpc_alpha value
 ALPHA_POINT_COLORS = [plt.cm.viridis(v) for v in np.linspace(0.0, 0.85, len(ALPHA_ORDER))]
@@ -287,7 +291,10 @@ def _plot_scatter_row(df: pd.DataFrame, y_col_prefix: str,
 
     y_col_prefix: 'mean_entropy' or 'policy_complexity'
     """
-    fig, axes = plt.subplots(1, 4, figsize=(18, 4.5), sharey=False)
+    n_phases = len(PHASES)
+    fig, axes = plt.subplots(1, n_phases, figsize=(4.5 * n_phases, 4.5), sharey=False)
+    if n_phases == 1:
+        axes = [axes]
     alpha_to_color = {a: ALPHA_POINT_COLORS[i] for i, a in enumerate(ALPHA_ORDER)}
 
     for ax, phase, phase_color in zip(axes, PHASES, PHASE_COLORS):
@@ -577,6 +584,8 @@ def write_stats_csv(stats_rows: list, out_dir: pathlib.Path, alpha_suffix: str =
 
 def main() -> None:
     args = parse_args()
+
+    _init_phases(args.task_id)
 
     sns.set_style('whitegrid')
     plt.rcParams.update({
