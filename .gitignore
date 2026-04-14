@@ -58,12 +58,14 @@ __marimo__/
 *.ckpt
 checkpoints/
 modal_checkpoints/
+modal_checkpoints_normalised/
 modal_checkpoints_oldmodal/
 outputs/
 logs/
 
 # Evaluation cache (routing data JSON files)
 evaluation_cache/
+evaluation_cache_normalised/
 
 # Trajectories
 trajectories/
