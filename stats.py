@@ -357,11 +357,101 @@ if __name__ == '__main__':
     parser.add_argument('--update', type=int, default=None, help='Training update step (e.g. 1500)')
     parser.add_argument('--cache_dir', type=str, default='evaluation_cache',
                         help='Root directory for routing data cache (default: evaluation_cache)')
+    parser.add_argument('--agg_seeds', action='store_true',
+                        help='Aggregate spatial correlations across all seeds via Fisher z-transform. '
+                             'Requires --update. Reports mean r, SEM, and t-test p-value per phase.')
     args = parser.parse_args()
 
     task_id = args.task_id
     trial = args.trial
     group_by = args.group_by
+
+    # ── Seed-aggregated mode ───────────────────────────────────────────────────
+    if args.agg_seeds:
+        if args.update is None:
+            print("[error] --agg_seeds requires --update to be specified.")
+            sys.exit(1)
+
+        from seed_agg_plots import discover_seeded_caches
+        from plotting_utils import build_routing_data_tuples, compute_empirical_entropy
+
+        seed_cache_list = discover_seeded_caches(task_id, trial, args.cache_dir, args.update)
+        if not seed_cache_list:
+            print(f"[error] No seeded caches found for trial {trial} update {args.update} in {args.cache_dir}")
+            sys.exit(1)
+
+        # Phases to report: detect from task_id
+        from corr_plots import PHASE_LIST, TASK_PHASE_SYSTEM
+        phase_system = TASK_PHASE_SYSTEM.get(task_id, 'key_phase')
+        phases = PHASE_LIST[phase_system]
+
+        corr_types = [
+            ('entropy',  lambda rd, P_a: spatial_entropy_lpc_correlation(rd)),
+            ('kl_local', lambda rd, P_a: spatial_kl_lpc_correlation(rd)),
+            ('kl_global',lambda rd, P_a: spatial_kl_lpc_correlation(rd, P_a=P_a)),
+        ]
+
+        # Collect per-seed r values: {corr_type: {phase: [r, ...]}}
+        seed_rs = {ct: {ph: [] for ph in phases} for ct, _ in corr_types}
+        n_seeds_used = 0
+
+        for seed_num, upd_num, path in seed_cache_list:
+            print(f"  Loading seed {seed_num} update {upd_num}...", end=" ", flush=True)
+            with open(path) as f:
+                _cache = json.load(f)
+            rd = build_routing_data_tuples(_cache)
+            P_a_global = compute_empirical_entropy(rd)['P_a']
+            print(f"{len(rd)} timesteps")
+            n_seeds_used += 1
+
+            for ct, fn in corr_types:
+                for ph in phases:
+                    ph_data = list(_filter_by_phase(rd, ph))
+                    if not ph_data:
+                        continue
+                    res = fn(ph_data, P_a_global)
+                    r = res['r']
+                    if not np.isnan(r):
+                        seed_rs[ct][ph].append(r)
+
+        print(f"\nTask: {task_id}  Trial: {trial}  Update: {args.update}  Seeds: {n_seeds_used}")
+        print()
+
+        def _fisher_agg(r_list):
+            """Fisher z-transform aggregate: mean_r, sem_r, t-test p-value, n_seeds."""
+            n = len(r_list)
+            if n < 2:
+                return float('nan'), float('nan'), float('nan'), n
+            z = np.arctanh(np.clip(r_list, -0.9999, 0.9999))
+            mean_z = float(np.mean(z))
+            sem_z  = float(np.std(z, ddof=1) / np.sqrt(n))
+            t_stat, p_val = stats.ttest_1samp(z, 0.0)
+            mean_r = float(np.tanh(mean_z))
+            r_lo   = float(np.tanh(mean_z - sem_z))
+            r_hi   = float(np.tanh(mean_z + sem_z))
+            return mean_r, r_lo, r_hi, float(p_val), n
+
+        col_w = len('r=+0.0000 [+0.0000,+0.0000] p=0.0000e+00 n=10')
+        cols = [ct for ct, _ in corr_types]
+        from corr_plots import PHASE_LABELS
+        phase_label_w = max(len(PHASE_LABELS.get(ph, ph)) for ph in phases)
+
+        print("Seed-aggregated spatial correlations (Fisher z-transform, one-sample t-test vs 0)")
+        print("  " + " " * phase_label_w + "  " + "  ".join(c.ljust(col_w) for c in cols))
+        for ph in phases:
+            ph_label = PHASE_LABELS.get(ph, ph).ljust(phase_label_w)
+            cells = []
+            for ct, _ in corr_types:
+                r_list = seed_rs[ct][ph]
+                if len(r_list) < 2:
+                    cells.append("n/a".ljust(col_w))
+                    continue
+                mean_r, r_lo, r_hi, p_val, n = _fisher_agg(r_list)
+                cells.append(
+                    f"r={mean_r:+.4f} [{r_lo:+.4f},{r_hi:+.4f}] p={p_val:.4e} n={n}".ljust(col_w)
+                )
+            print("  " + ph_label + "  " + "  ".join(cells))
+        sys.exit(0)
 
     # Build cache path: support new seed/update layout and old flat layout
     base = pathlib.Path(args.cache_dir) / task_id / f'trial_{trial}'

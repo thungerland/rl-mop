@@ -76,6 +76,9 @@ _parser.add_argument('--cache_dir', type=str, default='evaluation_cache',
                      help='Root directory for routing data cache (default: evaluation_cache)')
 _parser.add_argument('--plots_dir', type=str, default='plots',
                      help='Root directory for output plots (default: plots)')
+_parser.add_argument('--agg_seeds', action='store_true',
+                     help='Aggregate all seeds for this trial/update into one heatmap. '
+                          'Requires --update. Ignores --seed if also provided.')
 _args = _parser.parse_args()
 
 task_id = _args.task_id
@@ -118,24 +121,53 @@ if plot_type not in ALL_TYPES:
     sys.exit(1)
 
 # ── 2. Load cache ─────────────────────────────────────────────────────────────
-_base = pathlib.Path(_args.cache_dir) / task_id / f'trial_{trial}'
-if _args.seed is not None:
-    _base = _base / f'seed_{_args.seed}'
-if _args.update is not None:
-    _base = _base / f'update_{_args.update}'
-cache_path = _base / 'routing_data.json'
+if _args.agg_seeds:
+    if _args.update is None:
+        print("[error] --agg_seeds requires --update to be specified.")
+        sys.exit(1)
+    if _args.seed is not None:
+        print("[warn] --seed is ignored when --agg_seeds is set.")
 
-# Legacy fallback: old flat layout without seed/update dirs
-if not cache_path.exists() and _args.seed is None and _args.update is None:
-    cache_path = pathlib.Path(_args.cache_dir) / task_id / task_id / f"trial_{trial}" / "routing_data.json"
-if not cache_path.exists():
-    print(f"Cache not found: {cache_path}")
-    sys.exit(1)
+    from seed_agg_plots import discover_seeded_caches
+    seed_cache_list = discover_seeded_caches(task_id, trial, _args.cache_dir, _args.update)
+    if not seed_cache_list:
+        print(f"[error] No seeded caches found for trial {trial} update {_args.update} in {_args.cache_dir}")
+        sys.exit(1)
 
-with open(cache_path) as f:
-    cache = json.load(f)
+    routing_data = []
+    first_cache = None
+    for seed_num, upd_num, path in seed_cache_list:
+        print(f"  Loading seed {seed_num} update {upd_num}...", end=" ", flush=True)
+        with open(path) as f:
+            _cache = json.load(f)
+        if first_cache is None:
+            first_cache = _cache
+        routing_data.extend(build_routing_data_tuples(_cache))
+        print("done")
 
-routing_data = build_routing_data_tuples(cache)
+    cache = first_cache
+    print(f"Aggregated {len(routing_data)} timesteps from {len(seed_cache_list)} seeds.")
+
+else:
+    _base = pathlib.Path(_args.cache_dir) / task_id / f'trial_{trial}'
+    if _args.seed is not None:
+        _base = _base / f'seed_{_args.seed}'
+    if _args.update is not None:
+        _base = _base / f'update_{_args.update}'
+    cache_path = _base / 'routing_data.json'
+
+    # Legacy fallback: old flat layout without seed/update dirs
+    if not cache_path.exists() and _args.seed is None and _args.update is None:
+        cache_path = pathlib.Path(_args.cache_dir) / task_id / task_id / f"trial_{trial}" / "routing_data.json"
+    if not cache_path.exists():
+        print(f"Cache not found: {cache_path}")
+        sys.exit(1)
+
+    with open(cache_path) as f:
+        cache = json.load(f)
+
+    routing_data = build_routing_data_tuples(cache)
+
 _P_a_global = compute_empirical_entropy(routing_data)['P_a']
 
 # Load expert_hidden_sizes for per-layer LPC computation.
@@ -150,12 +182,13 @@ if expert_hidden_sizes is None:
         expert_hidden_sizes = _cfg.get('expert_hidden_sizes')
 
 metrics = cache["metrics"]
-print(
-    f"Loaded {len(routing_data)} timesteps | "
-    f"success={metrics['success_rate']:.1%} | "
-    f"path_ratio={metrics['path_ratio']:.2f} | "
-    f"mean_lpc={metrics['mean_lpc']:.2f}"
-)
+if not _args.agg_seeds:
+    print(
+        f"Loaded {len(routing_data)} timesteps | "
+        f"success={metrics['success_rate']:.1%} | "
+        f"path_ratio={metrics['path_ratio']:.2f} | "
+        f"mean_lpc={metrics['mean_lpc']:.2f}"
+    )
 
 # ── 3. Sample environment images ──────────────────────────────────────────────
 # Runs up to 1000 env resets to collect one render per group (same logic as
@@ -376,10 +409,13 @@ elif plot_type == "cell_action_distribution":
 
 # ── 5. Preview & optionally save ──────────────────────────────────────────────
 out_dir = pathlib.Path(_args.plots_dir) / task_id / f"trial_{trial}"
-if _args.seed is not None:
-    out_dir = out_dir / f"seed_{_args.seed}"
-if _args.update is not None:
-    out_dir = out_dir / f"update_{_args.update}"
+if _args.agg_seeds:
+    out_dir = out_dir / "agg_seeds" / f"update_{_args.update}"
+else:
+    if _args.seed is not None:
+        out_dir = out_dir / f"seed_{_args.seed}"
+    if _args.update is not None:
+        out_dir = out_dir / f"update_{_args.update}"
 
 filename_map = {
     "overall":                       "routing_heatmap.png",
