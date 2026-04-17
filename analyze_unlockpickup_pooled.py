@@ -122,6 +122,11 @@ def parse_args() -> argparse.Namespace:
         help='Only use rows from this training checkpoint (default: 5000)',
     )
     parser.add_argument(
+        '--min_update', type=int, default=None,
+        help='Include all checkpoints with update >= this value instead of filtering to --update. '
+             'Overrides --update when set.',
+    )
+    parser.add_argument(
         '--alpha_values', nargs='+', type=float,
         default=[0.0, 1e-6, 1e-5, 1e-4],
         help='Alpha values to include (default: 0 1e-6 1e-5 1e-4)',
@@ -131,8 +136,13 @@ def parse_args() -> argparse.Namespace:
 
 # ── Data loading ───────────────────────────────────────────────────────────────
 
-def load_data(csv_path: str, task_id: str, update: int, alpha_values: list) -> pd.DataFrame:
-    """Load, filter to task_id, restrict to specified alpha values and a single update checkpoint."""
+def load_data(csv_path: str, task_id: str, update: int, alpha_values: list,
+              min_update: int = None) -> pd.DataFrame:
+    """Load, filter to task_id, restrict to specified alpha values and update checkpoint(s).
+
+    If min_update is set, includes all rows with update >= min_update (overrides update).
+    Otherwise filters to the single update value.
+    """
     path = pathlib.Path(csv_path)
     if not path.exists():
         sys.exit(f'[error] CSV not found: {csv_path}')
@@ -151,18 +161,24 @@ def load_data(csv_path: str, task_id: str, update: int, alpha_values: list) -> p
     if df.empty:
         sys.exit(f'[error] No rows remain after filtering to alpha ∈ {alpha_values}')
 
-    # Restrict to the specified training checkpoint
     if 'update' in df.columns:
-        df = df[df['update'] == update].copy()
+        if min_update is not None:
+            df = df[df['update'] >= min_update].copy()
+            update_label = f'update>={min_update}'
+        else:
+            df = df[df['update'] == update].copy()
+            update_label = f'update={update}'
+    else:
+        update_label = 'update=unknown'
 
     if df.empty:
-        sys.exit(f'[error] No rows remain after filtering to update={update}')
+        sys.exit(f'[error] No rows remain after filtering to {update_label}')
 
     n_seeds = df['seed'].nunique() if 'seed' in df.columns else '?'
     n_alphas = df['lpc_alpha'].nunique() if 'lpc_alpha' in df.columns else '?'
     print(
         f'[info] Loaded {len(df)} rows for {task_id} '
-        f'(update={update}, {n_seeds} seeds, {n_alphas} alpha values)'
+        f'({update_label}, {n_seeds} seeds, {n_alphas} alpha values)'
     )
     print(f'[info] Alpha values used: {[_alpha_label(a) for a in sorted(alpha_values)]}')
     return df
@@ -599,16 +615,19 @@ def main() -> None:
     out_dir = pathlib.Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    df = load_data(args.csv, args.task_id, args.update, args.alpha_values)
+    df = load_data(args.csv, args.task_id, args.update, args.alpha_values, args.min_update)
 
-    # Build a filename suffix encoding the selected alphas, e.g. "alpha_0_1e-06_1e-05_1e-04"
+    # Build a filename suffix encoding the selected alphas and update range
+    update_label = f'gte{args.min_update}' if args.min_update is not None else str(args.update)
+    update_desc  = f'update>={args.min_update}' if args.min_update is not None else f'update={args.update}'
     alpha_suffix = 'alpha_' + '_'.join(_alpha_label(a) for a in sorted(args.alpha_values))
+    alpha_suffix += f'_update_{update_label}'
 
     # Figure 1: LPC vs H(A|S)
     print('[info] Generating Figure 1: pooled scatter LPC vs H(A|S) ...')
     fig1 = _plot_scatter_row(
         df, 'mean_entropy', 'Mean H(A|S) (bits)',
-        f'{args.task_id} — Mean LPC vs H(A|S), pooled across seeds × alpha (update={args.update})',
+        f'{args.task_id} — Mean LPC vs H(A|S), pooled across seeds × alpha ({update_desc})',
     )
     save_figure(fig1, out_dir, f'pooled_scatter_entropy_by_phase_{alpha_suffix}', args.save)
 
@@ -616,7 +635,7 @@ def main() -> None:
     print('[info] Generating Figure 2: pooled scatter LPC vs policy complexity ...')
     fig2 = _plot_scatter_row(
         df, 'policy_complexity', 'Policy complexity I(S;A)',
-        f'{args.task_id} — Mean LPC vs policy complexity, pooled across seeds × alpha (update={args.update})',
+        f'{args.task_id} — Mean LPC vs policy complexity, pooled across seeds × alpha ({update_desc})',
     )
     save_figure(fig2, out_dir, f'pooled_scatter_pc_by_phase_{alpha_suffix}', args.save)
 
