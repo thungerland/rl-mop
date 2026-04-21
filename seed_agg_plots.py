@@ -255,7 +255,7 @@ def aggregate_seed_records(seed_df: pd.DataFrame) -> pd.DataFrame:
             se_z = float(np.std(z_vals, ddof=1) / np.sqrt(n_seeds))
             # Asymmetric SEM half-width in r-space (upper side).
             sem_r = float(np.tanh(mean_z + se_z) - mean_r)
-            _, p_agg = scipy_stats.ttest_1samp(z_vals, popmean=0.0)
+            _, p_agg = scipy_stats.ttest_1samp(r_vals, popmean=0.0)
             p_agg = float(p_agg)
         else:
             se_z = float('nan')
