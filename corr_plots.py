@@ -599,145 +599,6 @@ def plot_phase_subplots_vs_alpha(
     return fig
 
 
-# ── Scatter panel figure ──────────────────────────────────────────────────────
-
-# 4-stop plasma ramp: perceptually ordered, print-safe.
-_SCATTER_ALPHA_COLORS = [
-    plt.cm.plasma(0.15),  # α = 0      (light yellow)
-    plt.cm.plasma(0.40),  # α = 1e-6
-    plt.cm.plasma(0.65),  # α = 1e-5
-    plt.cm.plasma(0.88),  # α = 1e-4   (deep purple)
-]
-_SCATTER_PHASE_MARKERS = ['o', 's', '^', 'D']
-
-
-def plot_scatter_panel(
-    df: pd.DataFrame,
-    phases: list,
-    alpha_subset: list,
-    title: str,
-) -> plt.Figure:
-    """2D summary scatter: x = r(H(A|S), LPC), y = r(KL_local, LPC).
-
-    Each point = one (phase, alpha) combination. Color encodes alpha (plasma ramp),
-    marker encodes phase. Zero reference lines and phase-label annotations included.
-    """
-    # Validate expected alphas and phases are present.
-    present_alphas = set(df['lpc_alpha'].unique())
-    for a in alpha_subset:
-        if a not in present_alphas:
-            raise KeyError(
-                f"Alpha {a} not found in data. Available: {sorted(present_alphas)}."
-            )
-    present_phases = set(df['phase'].unique())
-    for p in phases:
-        if str(p) not in present_phases:
-            raise KeyError(f"Phase '{p}' not found in data. Available: {present_phases}.")
-
-    # Pivot: mean r per (alpha, phase, corr) then unstack corr into columns.
-    pivot = (
-        df[df['corr'].isin(['lpc_entropy', 'lpc_kl_local'])]
-        .groupby(['lpc_alpha', 'phase', 'phase_label', 'corr'])['r']
-        .mean()
-        .unstack('corr')
-        .reset_index()
-    )
-    # Ensure both columns exist (guard against missing data).
-    for col in ('lpc_entropy', 'lpc_kl_local'):
-        if col not in pivot.columns:
-            raise KeyError(f"Column '{col}' missing after pivot — no data for that corr type.")
-
-    alpha_color = {a: c for a, c in zip(alpha_subset, _SCATTER_ALPHA_COLORS)}
-    phase_marker = {str(p): m for p, m in zip(phases, _SCATTER_PHASE_MARKERS)}
-
-    sns.set_style('whitegrid')
-    fig, ax = plt.subplots(figsize=(8.5, 5.2))
-
-    # Zero reference lines.
-    ax.axvline(0, color='#aaaaaa', linewidth=0.9, linestyle='--', zorder=1)
-    ax.axhline(0, color='#aaaaaa', linewidth=0.9, linestyle='--', zorder=1)
-
-    # Scatter points.
-    for _, row in pivot.iterrows():
-        alpha = row['lpc_alpha']
-        if alpha not in alpha_subset:
-            continue
-        phase_str = row['phase']
-        x = row.get('lpc_entropy', float('nan'))
-        y = row.get('lpc_kl_local', float('nan'))
-        if np.isnan(x) or np.isnan(y):
-            continue
-
-        color = alpha_color.get(alpha, '#888888')
-        marker = phase_marker.get(phase_str, 'o')
-
-        ax.scatter(
-            x, y,
-            color=color,
-            marker=marker,
-            s=90,
-            zorder=3,
-            edgecolors='white',
-            linewidths=0.6,
-        )
-
-        # Phase-label annotation, slightly offset above-right.
-        label = row['phase_label']
-        ax.annotate(
-            label,
-            (x, y),
-            textcoords='offset points',
-            xytext=(5, 4),
-            fontsize=6.5,
-            color=color,
-            alpha=0.85,
-            zorder=4,
-        )
-
-    ax.set_xlabel('r  [H(A|S)  vs  LPC]', fontsize=10)
-    ax.set_ylabel('r  [KL local  vs  LPC]', fontsize=10)
-    ax.tick_params(labelsize=8)
-
-    # ── Alpha legend (color patches) ──
-    alpha_labels = ['0' if a == 0.0 else f'{a:.0e}' for a in alpha_subset]
-    alpha_handles = [
-        plt.Line2D([0], [0], marker='o', color='w', markerfacecolor=c,
-                   markersize=8, label=f'α = {lbl}')
-        for c, lbl in zip(_SCATTER_ALPHA_COLORS, alpha_labels)
-    ]
-    # ── Phase legend (marker shapes) ──
-    phase_handles = [
-        plt.Line2D([0], [0], marker=m, color='w', markerfacecolor='#555555',
-                   markersize=8, label=PHASE_LABELS.get(p, str(p)))
-        for p, m in zip(phases, _SCATTER_PHASE_MARKERS)
-    ]
-
-    # Combine into two groups with a blank separator.
-    legend1 = ax.legend(
-        handles=alpha_handles,
-        title='Regularisation α',
-        title_fontsize=8,
-        fontsize=7.5,
-        loc='upper left',
-        bbox_to_anchor=(1.02, 1.0),
-        frameon=True,
-    )
-    ax.add_artist(legend1)
-    ax.legend(
-        handles=phase_handles,
-        title='Phase',
-        title_fontsize=8,
-        fontsize=7.5,
-        loc='upper left',
-        bbox_to_anchor=(1.02, 0.52),
-        frameon=True,
-    )
-
-    ax.set_title(title, fontsize=10, pad=6)
-    fig.tight_layout(rect=[0, 0, 0.78, 1])
-    return fig
-
-
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -745,7 +606,7 @@ def main():
         description='Correlation plots across phases or regularisation'
     )
     parser.add_argument('task_id', type=str)
-    parser.add_argument('--mode', choices=['alpha', 'phase', 'phase_subplots', 'scatter_panel'], default='alpha')
+    parser.add_argument('--mode', choices=['alpha', 'phase', 'phase_subplots'], default='alpha')
     parser.add_argument(
         '--corr',
         choices=['lpc_entropy', 'lpc_dist', 'entropy_dist', 'kl_dist'],
@@ -809,7 +670,7 @@ def main():
         trials = [int(t.strip()) for t in args.trials.split(',')]
 
     if args.corr != 'lpc_entropy' and phase_system == 'none' and args.dist is None \
-            and args.mode not in ('phase_subplots', 'scatter_panel'):
+            and args.mode != 'phase_subplots':
         parser.error("--dist is required when --phase_system none and corr type is not lpc_entropy")
 
     safe_task = args.task_id.replace('/', '_')
@@ -855,44 +716,6 @@ def main():
         out_path = args.output
         if out_path is None:
             out_path = str(out_dir / f'{safe_task}_phase_subplots_alpha.png')
-
-    elif args.mode == 'scatter_panel':
-        if args.alpha_values is not None:
-            alpha_subset = [float(a.strip()) for a in args.alpha_values.split(',')]
-        else:
-            alpha_subset = _SUBPLOT_ALPHA_ORDER
-
-        print(f"Task: {args.task_id}  Trials: {trials}  Phases: {phases}")
-        print(f"Mode: scatter_panel  Alpha subset: {alpha_subset}")
-        print()
-
-        df = _collect_phase_subplot_records(
-            task_id=args.task_id,
-            trials=trials,
-            alpha_map=alpha_map,
-            phases=phases,
-            cache_dir=args.cache_dir,
-            alpha_subset=alpha_subset,
-        )
-
-        if df.empty:
-            print("No data collected — cannot plot.")
-            return
-
-        title = (
-            f"{args.task_id}\n"
-            f"Entropy vs KL-local correlation with LPC — by phase and α"
-        )
-        fig = plot_scatter_panel(
-            df,
-            phases=phases,
-            alpha_subset=alpha_subset,
-            title=title,
-        )
-
-        out_path = args.output
-        if out_path is None:
-            out_path = str(out_dir / f'{safe_task}_scatter_panel_alpha.png')
 
     else:
         print(f"Task: {args.task_id}  Trials: {trials}  Phases: {phases}")
