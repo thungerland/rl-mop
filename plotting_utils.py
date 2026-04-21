@@ -1416,12 +1416,27 @@ def _plot_grouped_entropy_heatmap(
     cmap = plt.cm.get_cmap(cmap_name).copy()
     cmap.set_bad(color=UNVISITED_COLOR)
 
+    # Pre-compute entropy grids for all groups and derive global vmin/vmax so
+    # every row shares the same colormap scale and the colorbar is accurate.
+    entropy_grids = {}
+    all_vals = []
+    for group_key in sorted_keys:
+        group_data = groups[group_key]
+        avg_entropy_by_pos = compute_entropy_fn(group_data, min_visits=min_visits)
+        g = np.full((grid_height, grid_width), np.nan)
+        for pos, val in avg_entropy_by_pos.items():
+            gx, gy = pos[0] - x_min, pos[1] - y_min
+            g[gy, gx] = val
+        entropy_grids[group_key] = g
+        all_vals.extend(v for v in g.ravel() if np.isfinite(v))
+
+    vmin = float(np.nanmin(all_vals)) if all_vals else 0.0
+    vmax = float(np.nanmax(all_vals)) if all_vals else 1.0
+
     entropy_im = None
 
     for row_idx, group_key in enumerate(sorted_keys):
         group_data = groups[group_key]
-        avg_entropy_by_pos = compute_entropy_fn(group_data, min_visits=min_visits)
-
         col_idx = 0
         label = group_labels[group_key]
 
@@ -1440,13 +1455,9 @@ def _plot_grouped_entropy_heatmap(
                 ax.set_title("Environment Layout")
             col_idx += 1
 
-        entropy_grid = np.full((grid_height, grid_width), np.nan)
-        for pos, val in avg_entropy_by_pos.items():
-            gx, gy = pos[0] - x_min, pos[1] - y_min
-            entropy_grid[gy, gx] = val
-
         ax = fig.add_subplot(gs[row_idx, col_idx])
-        entropy_im = ax.imshow(entropy_grid, origin='upper', cmap=cmap)
+        entropy_im = ax.imshow(entropy_grids[group_key], origin='upper', cmap=cmap,
+                               vmin=vmin, vmax=vmax)
         if not has_env_image:
             ax.set_ylabel(f"{label}\n({len(group_data)} samples)", fontsize=9)
         ax.set_xlabel("X")
