@@ -21,6 +21,7 @@ image = (
     .pip_install("git+https://github.com/mila-iqia/babyai.git")
     .add_local_dir(".", remote_path="/root/project", ignore=[
         "evaluation_cache",
+        "evaluation_cache_normalised",
         "evaluation_results.csv",
         "modal_checkpoints",
         "checkpoints",
@@ -440,6 +441,7 @@ def extract_seed_metrics(
     output_csv: str = "/eval_output/eval_metrics_unlockpickup.csv",
     cache_dir: str = "/eval_output/evaluation_cache",
     phase_system: str = None,  # None = auto-detect from task_id via TASK_PHASE_SYSTEM
+    update_filter: int = None,  # if set, only process this update number
 ):
     """
     Read every routing_data.json for the given task/trials from the eval volume,
@@ -539,6 +541,8 @@ def extract_seed_metrics(
 
             # Sort by update number (ascending) to process ALL checkpoints for trial 20
             update_dirs.sort(key=lambda x: x[0])
+            if update_filter is not None:
+                update_dirs = [(u, p) for u, p in update_dirs if u == update_filter]
 
             for upd_num, cache_path in update_dirs:
                 label = f"trial={trial} seed={seed_num} update={upd_num}"
@@ -656,6 +660,7 @@ def run_extract_seed_metrics(
     output_csv: str = "/eval_output/eval_metrics_unlockpickup.csv",
     cache_dir: str = "/eval_output/evaluation_cache",
     phase_system: str = None,  # None = auto-detect from task_id
+    update: int = None,  # if set, only process this update number
 ):
     """
     Launch extract_seed_metrics on Modal.
@@ -687,6 +692,7 @@ def run_extract_seed_metrics(
         output_csv=output_csv,
         cache_dir=cache_dir,
         phase_system=phase_system,
+        update_filter=update,
     )
 
     from pathlib import Path
