@@ -1,9 +1,9 @@
 """
 analyze_unlockpickup_pooled.py — Pooled publication-quality analysis for BabyAI-UnlockPickup-v0.
 
-Produces five figures and a stats CSV, pooling all evaluation datapoints
-(seed × alpha × checkpoint) for alpha ∈ {0, 1e-6, 1e-5, 1e-4}.
-(alpha=1e-3 is excluded because success breaks down at that regularisation strength.)
+Produces three figures, pooling all evaluation datapoints
+(seed × alpha × checkpoint) for alpha ∈ {1e-6, 1e-5, 1e-4}.
+(alpha=0.0 and alpha=1e-3 are excluded.)
 
   Figure 1 — pooled_scatter_entropy_by_phase.png
     1×4 row: x = mean LPC, y = H(A|S). One panel per phase.
@@ -14,18 +14,9 @@ Produces five figures and a stats CSV, pooling all evaluation datapoints
     OLS regression + 95% CI. Annotated with r, p, N.
 
   Figure 3 — correlation_summary_by_phase.png
-    Combined grouped bar chart: 4 metrics × 4 phases.
-    H(A|S) and policy complexity: r recomputed from raw data, Fisher z CI, significance stars.
-    KL-local and KL-global: mean of pre-computed r columns, Fisher z CI (no p-value available).
-
-  Figure 4 — regression_coefficients_entropy_by_phase.png
-    OLS coefficient of LPC → H(A|S) per phase, controlling for alpha and seed.
-
-  Figure 5 — regression_coefficients_pc_by_phase.png
-    OLS coefficient of LPC → policy complexity per phase, controlling for alpha and seed.
-
-  stats_summary.csv
-    Phase-level table for all metrics.
+    Combined grouped bar chart: 3 metrics × 4 phases.
+    r values aggregated via Fisher z-transform across seeds × alpha.
+    p-values from one-sample t-test (H0: r = 0) on raw per-seed r values.
 
 Usage:
     python analyze_unlockpickup_pooled.py [--csv PATH] [--out_dir DIR] [--save] [--task_id ID]
@@ -48,7 +39,7 @@ from scipy import stats as scipy_stats
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 # alpha=1e-3 excluded: success breaks down at that regularisation strength.
-ALPHA_ORDER = [0.0, 1e-6, 1e-5, 1e-4]
+ALPHA_ORDER = [1e-6, 1e-5, 1e-4]
 
 # Phases, labels, and colors are resolved at runtime from the task_id.
 # These module-level names are populated by _init_phases() called in main().
@@ -75,7 +66,7 @@ def _init_phases(task_id: str) -> None:
 ALPHA_POINT_COLORS = [plt.cm.viridis(v) for v in np.linspace(0.0, 0.85, len(ALPHA_ORDER))]
 
 # Per-metric colors and labels for the combined correlation summary (Fig 3)
-METRICS = ['entropy', 'pc', 'kl_local', 'kl_global']
+METRICS = ['entropy', 'kl_local', 'kl_global']
 METRIC_COLORS = {
     'entropy':  '#9b59b6',
     'pc':       '#e76f51',
@@ -128,8 +119,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         '--alpha_values', nargs='+', type=float,
-        default=[0.0, 1e-6, 1e-5, 1e-4],
-        help='Alpha values to include (default: 0 1e-6 1e-5 1e-4)',
+        default=[1e-6, 1e-5, 1e-4],
+        help='Alpha values to include (default: 1e-6 1e-5 1e-4)',
     )
     return parser.parse_args()
 
@@ -240,6 +231,36 @@ def _r_ci_from_precomputed(r: float, N: int, alpha: float = 0.05) -> tuple:
     return float(np.tanh(z - z_crit * se_z)), float(np.tanh(z + z_crit * se_z))
 
 
+def _fisher_aggregate(r_values) -> tuple:
+    """Aggregate per-seed Pearson r values via Fisher z-transform.
+
+    Returns (r_agg, p_value, ci_lo, ci_hi).
+    - r_agg  : back-transformed mean of Fisher z scores
+    - p_value: one-sample t-test of raw r values against H0: mean = 0
+    - ci_lo/hi: 95% CI derived from the spread of Fisher z scores
+    """
+    r_arr = np.asarray(r_values, dtype=float)
+    r_arr = r_arr[np.isfinite(r_arr)]
+    n = len(r_arr)
+    if n < 2:
+        return float('nan'), float('nan'), float('nan'), float('nan')
+
+    z_arr = np.arctanh(np.clip(r_arr, -0.9999, 0.9999))
+    z_mean = z_arr.mean()
+    r_agg = float(np.tanh(z_mean))
+
+    # t-test on raw r values against H0: mean = 0
+    _, p_val = scipy_stats.ttest_1samp(r_arr, popmean=0.0)
+
+    # 95% CI: SE of the mean z score across the n estimates
+    se_z = z_arr.std(ddof=1) / np.sqrt(n)
+    z_crit = scipy_stats.norm.ppf(0.975)
+    ci_lo = float(np.tanh(z_mean - z_crit * se_z))
+    ci_hi = float(np.tanh(z_mean + z_crit * se_z))
+
+    return r_agg, float(p_val), ci_lo, ci_hi
+
+
 def format_p(p: float) -> str:
     if np.isnan(p):
         return 'p = n/a'
@@ -258,45 +279,6 @@ def _sig_stars(p: float) -> str:
     if p < 0.05:
         return '*'
     return 'ns'
-
-
-def fit_ols_with_controls(sub: pd.DataFrame, lpc_col: str, y_col: str) -> tuple:
-    """OLS: y ~ lpc + C(lpc_alpha) + C(seed), numpy-only.
-
-    Returns (coef, ci_low, ci_high, p_val) for the LPC predictor. All NaN if underdetermined.
-    """
-    nan4 = (float('nan'),) * 4
-
-    sub = sub[[lpc_col, y_col, 'lpc_alpha', 'seed']].dropna()
-    N = len(sub)
-    if N < 5:
-        return nan4
-
-    intercept = np.ones((N, 1))
-    lpc_vals = sub[lpc_col].values.reshape(-1, 1)
-    alpha_dummies = pd.get_dummies(sub['lpc_alpha'], drop_first=True).values.astype(float)
-    seed_dummies = pd.get_dummies(sub['seed'], drop_first=True).values.astype(float)
-
-    X = np.hstack([intercept, lpc_vals, alpha_dummies, seed_dummies])
-    y = sub[y_col].values.astype(float)
-
-    n_params = X.shape[1]
-    if N <= n_params:
-        return nan4
-
-    beta, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
-    residuals = y - X @ beta
-    sigma2 = float(residuals @ residuals) / (N - n_params)
-    cov = sigma2 * np.linalg.pinv(X.T @ X)
-
-    coef = float(beta[1])
-    se = float(np.sqrt(max(cov[1, 1], 0.0)))
-    if se == 0.0:
-        return nan4
-
-    t_stat = coef / se
-    p_val = float(2.0 * scipy_stats.t.sf(abs(t_stat), df=N - n_params))
-    return coef, coef - 1.96 * se, coef + 1.96 * se, p_val
 
 
 # ── Shared scatter helper (Figures 1 & 2) ─────────────────────────────────────
@@ -370,63 +352,15 @@ def _plot_scatter_row(df: pd.DataFrame, y_col_prefix: str,
     return fig
 
 
-# ── Shared regression coefficient helper (Figures 4 & 5) ──────────────────────
-
-def _plot_regression_coefficients(df: pd.DataFrame, y_col_prefix: str,
-                                   y_label: str, title: str) -> tuple:
-    """OLS coefficient of LPC per phase for a given metric.
-
-    Returns (fig, results) where results is a list of (phase, coef, ci_lo, ci_hi, p).
-    """
-    results = []
-    for phase in PHASES:
-        lpc_col = f'mean_lpc_{phase}'
-        y_col = f'{y_col_prefix}_{phase}'
-        sub_cols = [c for c in [lpc_col, y_col, 'lpc_alpha', 'seed'] if c in df.columns]
-        sub = df[sub_cols].dropna()
-        if 'lpc_alpha' not in sub.columns or 'seed' not in sub.columns:
-            results.append((phase, float('nan'), float('nan'), float('nan'), float('nan')))
-        else:
-            coef, ci_lo, ci_hi, p = fit_ols_with_controls(sub, lpc_col, y_col)
-            results.append((phase, coef, ci_lo, ci_hi, p))
-
-    fig, ax = plt.subplots(figsize=(8, 5))
-    x_positions = np.arange(len(PHASES))
-
-    for i, (phase, coef, ci_lo, ci_hi, p) in enumerate(results):
-        if np.isnan(coef):
-            continue
-        ax.scatter(x_positions[i], coef, color=PHASE_COLORS[i], s=80, zorder=4)
-        ax.errorbar(x_positions[i], coef,
-                    yerr=[[coef - ci_lo], [ci_hi - coef]],
-                    fmt='none', color=PHASE_COLORS[i], capsize=6, linewidth=2.0, zorder=3)
-        star = _sig_stars(p)
-        offset = (ci_hi - ci_lo) * 0.12 + 1e-10
-        star_y = ci_hi + offset if coef >= 0 else ci_lo - offset
-        va = 'bottom' if coef >= 0 else 'top'
-        ax.text(x_positions[i], star_y, star, ha='center', va=va, fontsize=10)
-
-    ax.axhline(0, color='black', linewidth=1.2, linestyle='--', alpha=0.7, zorder=1)
-    ax.set_xticks(x_positions)
-    ax.set_xticklabels([PHASE_LABELS[ph] for ph in PHASES], fontsize=9)
-    ax.tick_params(axis='y', labelsize=9)
-    ax.set_ylabel(y_label, fontsize=11)
-    ax.set_title(title, fontsize=11, pad=16)
-    fig.tight_layout(rect=[0, 0, 1, 0.93])
-    return fig, results
-
-
 # ── Figure 3: Combined correlation summary ─────────────────────────────────────
 
 def plot_correlation_summary(df: pd.DataFrame, task_id: str) -> tuple:
-    """Combined grouped bar chart: 4 metrics × 4 phases.
+    """Combined grouped bar chart: 3 metrics × 4 phases.
 
-    Entropy, KL-local, KL-global: use pre-computed r_<phase>_lpc_* and p_<phase>_lpc_* columns
-    directly (mean r across runs, mean p for significance stars).
-    Policy complexity: computed from raw mean_lpc_<phase> vs policy_complexity_<phase> columns
-    (no pre-computed r available).
+    Aggregates per-seed pre-computed r values (r_<phase>_lpc_<metric>) via Fisher z-transform.
+    P-values from a one-sample t-test on the raw r values (H0: mean r = 0).
 
-    Returns (fig, stats_rows) where stats_rows is a list of dicts, one per phase.
+    Returns fig.
     """
     n_metrics = len(METRICS)
     bar_width = 0.18
@@ -437,88 +371,27 @@ def plot_correlation_summary(df: pd.DataFrame, task_id: str) -> tuple:
     data = {m: {'r': [], 'ci_lo': [], 'ci_hi': [], 'N': [], 'p': []} for m in METRICS}
     phase_N = {}
 
+    _metric_col_suffix = {
+        'entropy':  'entropy',
+        'kl_local': 'kl_local',
+        'kl_global': 'kl_global',
+    }
+
     for phase in PHASES:
         lpc_col = f'mean_lpc_{phase}'
         x = df[lpc_col].values if lpc_col in df.columns else np.array([])
         N_phase = int(np.sum(np.isfinite(x)))
         phase_N[phase] = N_phase
 
-        # H(A|S): use pre-computed r and p columns, averaged across runs
-        r_ent_col = f'r_{phase}_lpc_entropy'
-        p_ent_col = f'p_{phase}_lpc_entropy'
-        r_ent = float(df[r_ent_col].dropna().mean()) if r_ent_col in df.columns else float('nan')
-        p_ent = float(df[p_ent_col].dropna().mean()) if p_ent_col in df.columns else float('nan')
-        lo_ent, hi_ent = _r_ci_from_precomputed(r_ent, N_phase)
-        data['entropy']['r'].append(r_ent)
-        data['entropy']['ci_lo'].append(lo_ent)
-        data['entropy']['ci_hi'].append(hi_ent)
-        data['entropy']['N'].append(N_phase)
-        data['entropy']['p'].append(p_ent)
-
-        # Policy complexity: computed from raw means (no pre-computed r available)
-        pc_col = f'policy_complexity_{phase}'
-        y_pc = df[pc_col].values if pc_col in df.columns else np.array([])
-        N_pc, r_pc, p_pc, lo_pc, hi_pc = compute_pearsonr_with_ci(x, y_pc)
-        data['pc']['r'].append(r_pc)
-        data['pc']['ci_lo'].append(lo_pc)
-        data['pc']['ci_hi'].append(hi_pc)
-        data['pc']['N'].append(N_pc)
-        data['pc']['p'].append(p_pc)
-
-        # KL-local: use pre-computed r and p columns, averaged across runs
-        r_kl_loc_col = f'r_{phase}_lpc_kl_local'
-        p_kl_loc_col = f'p_{phase}_lpc_kl_local'
-        r_kl_loc = float(df[r_kl_loc_col].dropna().mean()) if r_kl_loc_col in df.columns else float('nan')
-        p_kl_loc = float(df[p_kl_loc_col].dropna().mean()) if p_kl_loc_col in df.columns else float('nan')
-        lo_kl_loc, hi_kl_loc = _r_ci_from_precomputed(r_kl_loc, N_phase)
-        data['kl_local']['r'].append(r_kl_loc)
-        data['kl_local']['ci_lo'].append(lo_kl_loc)
-        data['kl_local']['ci_hi'].append(hi_kl_loc)
-        data['kl_local']['N'].append(N_phase)
-        data['kl_local']['p'].append(p_kl_loc)
-
-        # KL-global: use pre-computed r and p columns, averaged across runs
-        r_kl_glob_col = f'r_{phase}_lpc_kl_global'
-        p_kl_glob_col = f'p_{phase}_lpc_kl_global'
-        r_kl_glob = float(df[r_kl_glob_col].dropna().mean()) if r_kl_glob_col in df.columns else float('nan')
-        p_kl_glob = float(df[p_kl_glob_col].dropna().mean()) if p_kl_glob_col in df.columns else float('nan')
-        lo_kl_glob, hi_kl_glob = _r_ci_from_precomputed(r_kl_glob, N_phase)
-        data['kl_global']['r'].append(r_kl_glob)
-        data['kl_global']['ci_lo'].append(lo_kl_glob)
-        data['kl_global']['ci_hi'].append(hi_kl_glob)
-        data['kl_global']['N'].append(N_phase)
-        data['kl_global']['p'].append(p_kl_glob)
-
-    # Build stats_rows (one per phase)
-    stats_rows = []
-    for i, phase in enumerate(PHASES):
-        stats_rows.append({
-            'phase': phase,
-            'N_entropy': data['entropy']['N'][i],
-            'r_entropy': data['entropy']['r'][i],
-            'p_entropy': data['entropy']['p'][i],
-            'r_entropy_ci_low': data['entropy']['ci_lo'][i],
-            'r_entropy_ci_high': data['entropy']['ci_hi'][i],
-            'N_pc': data['pc']['N'][i],
-            'r_pc': data['pc']['r'][i],
-            'p_pc': data['pc']['p'][i],
-            'r_pc_ci_low': data['pc']['ci_lo'][i],
-            'r_pc_ci_high': data['pc']['ci_hi'][i],
-            'r_kl_local': data['kl_local']['r'][i],
-            'r_kl_local_ci_low': data['kl_local']['ci_lo'][i],
-            'r_kl_local_ci_high': data['kl_local']['ci_hi'][i],
-            'r_kl_global': data['kl_global']['r'][i],
-            'r_kl_global_ci_low': data['kl_global']['ci_lo'][i],
-            'r_kl_global_ci_high': data['kl_global']['ci_hi'][i],
-            'reg_coef_entropy': float('nan'),
-            'reg_coef_entropy_ci_low': float('nan'),
-            'reg_coef_entropy_ci_high': float('nan'),
-            'reg_coef_entropy_p': float('nan'),
-            'reg_coef_pc': float('nan'),
-            'reg_coef_pc_ci_low': float('nan'),
-            'reg_coef_pc_ci_high': float('nan'),
-            'reg_coef_pc_p': float('nan'),
-        })
+        for metric in METRICS:
+            r_col = f'r_{phase}_lpc_{_metric_col_suffix[metric]}'
+            r_vals = df[r_col].dropna().values if r_col in df.columns else np.array([])
+            r_agg, p_agg, ci_lo, ci_hi = _fisher_aggregate(r_vals)
+            data[metric]['r'].append(r_agg)
+            data[metric]['ci_lo'].append(ci_lo)
+            data[metric]['ci_hi'].append(ci_hi)
+            data[metric]['N'].append(N_phase)
+            data[metric]['p'].append(p_agg)
 
     # Plot
     fig, ax = plt.subplots(figsize=(13, 5))
@@ -545,8 +418,11 @@ def plot_correlation_summary(df: pd.DataFrame, task_id: str) -> tuple:
 
             if not np.isnan(p):
                 star = _sig_stars(p)
-                star_y = r_hi + 0.02 if r >= 0 else r_lo - 0.04
-                ax.text(xpos, star_y, star, ha='center', va='bottom', fontsize=7)
+                if r >= 0:
+                    star_y, va = r_hi + 0.02, 'bottom'
+                else:
+                    star_y, va = r_lo - 0.02, 'top'
+                ax.text(xpos, star_y, star, ha='center', va=va, fontsize=7)
 
             all_ci_hi.append(r_hi)
             all_ci_lo.append(r_lo)
@@ -567,33 +443,33 @@ def plot_correlation_summary(df: pd.DataFrame, task_id: str) -> tuple:
 
     ax.set_ylabel('Pearson r  (vs Mean LPC)', fontsize=11)
     ax.set_title(
-        'Correlation with Mean LPC by phase and metric\n'
-        '(pooled, 95% CI via Fisher z-transform; KL from pre-computed per-run r)',
+        r'Correlation with Mean LPC by phase and metric'
+        '\n'
+        r'(Fisher z aggregation across seeds $\times$ alpha; t-test p-values vs $H_0$: $r = 0$)',
         fontsize=11,
     )
-    ax.legend(loc='upper right', fontsize=9, frameon=True)
+
+    # Combined legend outside the plot area to the right
+    metric_handles = [
+        mpatches.Patch(color=METRIC_COLORS[m], label=METRIC_LABELS[m])
+        for m in METRICS
+    ]
+    sig_handles = [
+        mpatches.Patch(color='none', label='— Significance —'),
+        mpatches.Patch(color='none', label='***  p < 0.001'),
+        mpatches.Patch(color='none', label='**    p < 0.01'),
+        mpatches.Patch(color='none', label='*      p < 0.05'),
+        mpatches.Patch(color='none', label='ns    p ≥ 0.05'),
+    ]
+    ax.legend(
+        handles=metric_handles + sig_handles,
+        loc='upper left', bbox_to_anchor=(1.01, 1), borderaxespad=0,
+        fontsize=8, frameon=True,
+    )
     fig.suptitle(task_id, fontsize=13)
-    fig.tight_layout()
+    fig.tight_layout(rect=[0, 0, 0.82, 1])
 
-    return fig, stats_rows
-
-
-# ── Stats CSV ──────────────────────────────────────────────────────────────────
-
-def write_stats_csv(stats_rows: list, out_dir: pathlib.Path, alpha_suffix: str = '') -> None:
-    """Write stats_summary.csv and print a concise table to stdout."""
-    stats_df = pd.DataFrame(stats_rows)
-    suffix = f'_{alpha_suffix}' if alpha_suffix else ''
-    out_path = out_dir / f'stats_summary{suffix}.csv'
-    stats_df.to_csv(out_path, index=False, float_format='%.6f')
-    print(f'\n[info] Stats summary saved -> {out_path}')
-
-    display_cols = ['phase', 'N_entropy', 'r_entropy', 'p_entropy',
-                    'r_pc', 'p_pc', 'r_kl_local', 'r_kl_global']
-    display_cols = [c for c in display_cols if c in stats_df.columns]
-    print('\n' + stats_df[display_cols].to_string(
-        index=False, float_format=lambda x: f'{x:.4f}'
-    ) + '\n')
+    return fig
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -641,48 +517,8 @@ def main() -> None:
 
     # Figure 3: Combined correlation summary
     print('[info] Generating Figure 3: combined correlation summary ...')
-    fig3, stats_rows = plot_correlation_summary(df, args.task_id)
+    fig3 = plot_correlation_summary(df, args.task_id)
     save_figure(fig3, out_dir, f'correlation_summary_by_phase_{alpha_suffix}', args.save)
-
-    # Figure 4: Regression coefficients for H(A|S)
-    print('[info] Generating Figure 4: regression coefficients LPC → H(A|S) ...')
-    fig4, reg_entropy = _plot_regression_coefficients(
-        df, 'mean_entropy',
-        'OLS coefficient of LPC\n(controlling for α and seed)',
-        'LPC → H(A|S) regression coefficient by phase\n'
-        '(OLS: entropy ~ LPC + α dummies + seed dummies)',
-    )
-    fig4.suptitle(args.task_id, fontsize=13)
-    save_figure(fig4, out_dir, f'regression_coefficients_entropy_by_phase_{alpha_suffix}', args.save)
-
-    # Figure 5: Regression coefficients for policy complexity
-    print('[info] Generating Figure 5: regression coefficients LPC → policy complexity ...')
-    fig5, reg_pc = _plot_regression_coefficients(
-        df, 'policy_complexity',
-        'OLS coefficient of LPC\n(controlling for α and seed)',
-        'LPC → policy complexity regression coefficient by phase\n'
-        '(OLS: PC ~ LPC + α dummies + seed dummies)',
-    )
-    fig5.suptitle(args.task_id, fontsize=13)
-    save_figure(fig5, out_dir, f'regression_coefficients_pc_by_phase_{alpha_suffix}', args.save)
-
-    # Merge regression results into stats_rows
-    for i, (phase, coef, ci_lo, ci_hi, p) in enumerate(reg_entropy):
-        stats_rows[i].update({
-            'reg_coef_entropy': coef,
-            'reg_coef_entropy_ci_low': ci_lo,
-            'reg_coef_entropy_ci_high': ci_hi,
-            'reg_coef_entropy_p': p,
-        })
-    for i, (phase, coef, ci_lo, ci_hi, p) in enumerate(reg_pc):
-        stats_rows[i].update({
-            'reg_coef_pc': coef,
-            'reg_coef_pc_ci_low': ci_lo,
-            'reg_coef_pc_ci_high': ci_hi,
-            'reg_coef_pc_p': p,
-        })
-
-    write_stats_csv(stats_rows, out_dir, alpha_suffix)
 
     if not args.save:
         input('Press Enter to close all figures...')
